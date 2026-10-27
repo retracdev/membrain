@@ -3,11 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { chmod, lstat, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   canonical,
   contains,
   safeDirectory,
   withLock,
+  errno,
 } from '../storage/files.js';
 import type { Snapshot } from '../storage/store.js';
 import { fail } from '../engine/model.js';
@@ -22,6 +24,8 @@ export interface QueryOptions {
   limit: number;
   offset?: number;
   rebuild?: boolean;
+  readOnly?: boolean;
+  literal?: boolean;
 }
 export interface Hit {
   record: Revision;
@@ -35,7 +39,13 @@ export interface QueryResult {
   warnings: Warning[];
 }
 
-export function literalQuery(input: string): string {
+const stopwords = new Set(
+  'a an the i me my we our you your he she it its they their this that these those am is are was were be been being do does did have has had can could would should will shall may might must of for to from in on at by with as and or but if then than which what who whom whose how when where why'.split(
+    ' ',
+  ),
+);
+
+export function literalQuery(input: string, literal = false): string {
   if (input.length > 2_048)
     fail('INVALID_QUERY', 'Query exceeds 2,048 characters.');
   const tokens = [
@@ -53,7 +63,13 @@ export function literalQuery(input: string): string {
     );
   if (tokens.length > 64)
     fail('INVALID_QUERY', 'Query exceeds 64 distinct tokens.');
-  return tokens.map((token) => `"${token}"`).join(' OR ');
+  const meaningful = literal
+    ? tokens
+    : tokens.filter((token) => !stopwords.has(token));
+  // A query consisting only of function words can still name a code identifier.
+  return (meaningful.length ? meaningful : tokens)
+    .map((token) => `"${token}"`)
+    .join(' OR ');
 }
 export function defaultCacheRoot(): string {
   return path.resolve(
@@ -118,7 +134,14 @@ export async function queryIndex(
   cacheRoot = defaultCacheRoot(),
 ): Promise<QueryResult> {
   const query =
-    options.query === undefined ? undefined : literalQuery(options.query);
+    options.query === undefined
+      ? undefined
+      : literalQuery(options.query, options.literal);
+  if (options.readOnly && options.rebuild)
+    fail(
+      'INVALID_QUERY',
+      '--read-only cannot be combined with --rebuild-index.',
+    );
   if (
     !Number.isSafeInteger(options.limit) ||
     options.limit < 1 ||
@@ -146,90 +169,85 @@ export async function queryIndex(
   const fingerprint = createHash('sha256')
     .update(JSON.stringify(snapshotsSorted.map((item) => item.fingerprint)))
     .digest('hex');
-  await safeDirectory(cacheRoot);
   const directory = path.join(cacheRoot, key);
-  await safeDirectory(directory);
   const file = path.join(directory, 'index.sqlite');
   const warnings = snapshots.flatMap((item) => item.warnings);
-  return withLock(directory, async () => {
+  let damaged = false;
+  const source = new Map(
+    snapshots
+      .flatMap((item) => item.records)
+      .map((record) => [record.revisionId, record]),
+  );
+  // Ordinary queries open SQLite read-only and do not acquire a filesystem lock.
+  // Replacement is serialized only when maintenance is actually necessary.
+  async function existing(rebuilt = false): Promise<QueryResult | undefined> {
     let db: Database.Database | undefined;
-    let rebuild = options.rebuild ?? false;
     try {
-      const stat = await lstat(file).catch(() => undefined);
+      const parent = await lstat(directory).catch((error: unknown) => {
+        if (errno(error) === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (!parent) return undefined;
+      if (!parent.isDirectory() || parent.isSymbolicLink())
+        fail(
+          'UNSAFE_CACHE_PATH',
+          `Index directory is not a real directory at ${directory}.`,
+        );
+      const stat = await lstat(file).catch((error: unknown) => {
+        if (errno(error) === 'ENOENT') return undefined;
+        throw error;
+      });
       if (stat?.isSymbolicLink() || (stat && !stat.isFile()))
         fail(
           'UNSAFE_CACHE_PATH',
           `Index path is not a regular file at ${file}.`,
         );
-      if (stat) {
-        try {
-          db = new Database(file, { timeout: 5_000 });
-          if (db.pragma('quick_check', { simple: true }) !== 'ok')
-            throw new Error('integrity check');
-          db.prepare("INSERT INTO fts(fts) VALUES ('integrity-check')").run();
-          const settings = new Map(
-            db
-              .prepare<[], { key: string; value: string }>(
-                'SELECT key,value FROM settings',
-              )
-              .all()
-              .map((item) => [item.key, item.value]),
+      if (!stat) return undefined;
+      db = new Database(file, {
+        readonly: true,
+        fileMustExist: true,
+        timeout: 5_000,
+      });
+      db.exec(
+        'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;',
+      );
+      // SQLite >=3.44 checks FTS5 through xIntegrity as part of this read-only
+      // pragma. It replaces the old quick_check + write-classified FTS INSERT.
+      if (db.pragma('integrity_check', { simple: true }) !== 'ok')
+        throw new Error('integrity check');
+      const settings = new Map(
+        db
+          .prepare<[], { key: string; value: string }>(
+            'SELECT key,value FROM settings',
+          )
+          .all()
+          .map((item) => [item.key, item.value]),
+      );
+      const oldHashes = new Map(
+        db
+          .prepare<[], { key: string; hash: string }>(
+            'SELECT key,hash FROM hashes',
+          )
+          .all()
+          .map((item) => [item.key, item.hash]),
+      );
+      for (const snapshot of snapshots)
+        for (const item of snapshot.hashes) {
+          const old = oldHashes.get(
+            `${snapshot.location.path}:${item.revisionId}`,
           );
-          const oldHashes = new Map(
-            db
-              .prepare<[], { key: string; hash: string }>(
-                'SELECT key,hash FROM hashes',
-              )
-              .all()
-              .map((item) => [item.key, item.hash]),
-          );
-          for (const snapshot of snapshots)
-            for (const item of snapshot.hashes) {
-              const old = oldHashes.get(
-                `${snapshot.location.path}:${item.revisionId}`,
-              );
-              if (old && old !== item.hash)
-                fail(
-                  'CORRUPT_STORE',
-                  'An immutable source revision changed since it was indexed. Restore the original or inspect its provenance; do not edit revision files in place.',
-                );
-            }
-          rebuild ||=
-            settings.get('version') !== schemaVersion ||
-            settings.get('fingerprint') !== fingerprint;
-        } catch (error) {
-          db?.close();
-          db = undefined;
-          if (error instanceof MembrainError) throw error;
-          rebuild = true;
-          warnings.push({
-            code: 'INDEX_RECOVERED',
-            message:
-              'The disposable SQLite index was damaged or incompatible and has been rebuilt from validated JSONL.',
-          });
+          if (old && old !== item.hash)
+            fail(
+              'CORRUPT_STORE',
+              'An immutable source revision changed since it was indexed. Restore the original or inspect its provenance; do not edit revision files in place.',
+            );
         }
-      } else rebuild = true;
-      if (rebuild) {
-        db?.close();
-        db = undefined;
-        const temporary = path.join(directory, `${randomUUID()}.sqlite`);
-        let generation: Database.Database | undefined;
-        try {
-          generation = new Database(temporary);
-          await chmod(temporary, 0o600);
-          populate(generation, snapshotsSorted, fingerprint);
-          if (generation.pragma('integrity_check', { simple: true }) !== 'ok')
-            fail('INDEX_FAILED', 'New index generation failed validation.');
-          generation.close();
-          generation = undefined;
-          await rename(temporary, file);
-        } finally {
-          generation?.close();
-          await unlink(temporary).catch(() => undefined);
-        }
-        db = new Database(file, { timeout: 5_000 });
-      }
-      if (!db) fail('INDEX_FAILED', 'Could not open the local search index.');
+      if (
+        (!rebuilt && options.rebuild) ||
+        settings.get('version') !== schemaVersion ||
+        settings.get('fingerprint') !== fingerprint
+      )
+        return undefined;
       const clauses: string[] = [];
       const bindings: (string | number)[] = [];
       if (query !== undefined) {
@@ -251,13 +269,8 @@ export async function queryIndex(
       const sql =
         query === undefined
           ? `SELECT e.revisionId,e.head,e.conflict FROM entries e ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY e.id COLLATE BINARY, e.revisionId COLLATE BINARY LIMIT ? OFFSET ?`
-          : `SELECT e.revisionId,e.head,e.conflict,bm25(fts,1.0,0.5) AS score FROM fts JOIN entries e ON e.revisionId=fts.revisionId WHERE ${clauses.join(' AND ')} ORDER BY score ASC,e.id COLLATE BINARY LIMIT ? OFFSET ?`;
+          : `SELECT e.revisionId,e.head,e.conflict,bm25(fts,1.0,2.0) AS score FROM fts JOIN entries e ON e.revisionId=fts.revisionId WHERE ${clauses.join(' AND ')} ORDER BY score ASC,e.id COLLATE BINARY LIMIT ? OFFSET ?`;
       bindings.push(options.limit, offset);
-      const source = new Map(
-        snapshots
-          .flatMap((item) => item.records)
-          .map((record) => [record.revisionId, record]),
-      );
       const rows = db
         .prepare<
           (string | number)[],
@@ -280,11 +293,86 @@ export async function queryIndex(
       });
       return {
         results,
-        index: { path: file, rebuilt: rebuild, revisions: source.size },
+        index: { path: file, rebuilt, revisions: source.size },
         warnings,
       };
+    } catch (error) {
+      if (error instanceof MembrainError || errno(error)?.startsWith('E'))
+        throw error;
+      damaged = true;
+      return undefined;
     } finally {
       db?.close();
     }
-  });
+  }
+  try {
+    const cached = await existing();
+    if (cached) return cached;
+    if (options.readOnly)
+      fail(
+        'INDEX_READ_ONLY',
+        'Read-only retrieval needs a current, readable SQLite index for these scopes. Allow internal cache maintenance and retry without --read-only, or choose an existing cache with MEMBRAIN_CACHE_DIR. Memory source records are never changed by retrieval.',
+      );
+    await safeDirectory(cacheRoot);
+    await safeDirectory(directory);
+    return await withLock(directory, async (assertOwned) => {
+      const cached = await existing();
+      if (cached) return cached;
+      const temporary = path.join(directory, `${randomUUID()}.sqlite`);
+      let generation: Database.Database | undefined;
+      try {
+        generation = new Database(temporary);
+        await chmod(temporary, 0o600);
+        populate(generation, snapshotsSorted, fingerprint);
+        if (generation.pragma('integrity_check', { simple: true }) !== 'ok')
+          fail('INDEX_FAILED', 'New index generation failed validation.');
+        generation
+          .prepare("INSERT INTO fts(fts) VALUES ('integrity-check')")
+          .run();
+        generation.close();
+        generation = undefined;
+        // Windows cannot replace a SQLite file while another reader holds its
+        // native handle. Wait briefly for readers, retaining the maintenance
+        // lock and checking ownership on every attempt. Never unlink the old
+        // generation or relax permissions to force replacement.
+        for (let attempt = 0; ; attempt++) {
+          await assertOwned();
+          try {
+            await rename(temporary, file);
+            break;
+          } catch (error) {
+            if (
+              process.platform !== 'win32' ||
+              attempt >= 40 ||
+              !['EPERM', 'EACCES', 'EBUSY'].includes(errno(error) ?? '')
+            )
+              throw error;
+            await delay(25);
+          }
+        }
+      } finally {
+        generation?.close();
+        await unlink(temporary).catch(() => undefined);
+      }
+      if (damaged)
+        warnings.push({
+          code: 'INDEX_RECOVERED',
+          message:
+            'The disposable SQLite index was damaged or incompatible and has been rebuilt from validated JSONL.',
+        });
+      const result = await existing(true);
+      if (!result)
+        fail(
+          'INDEX_FAILED',
+          'Cannot read the rebuilt SQLite index. Check the SQLite installation and retry with --rebuild-index.',
+        );
+      return result;
+    });
+  } catch (error) {
+    if (error instanceof MembrainError) throw error;
+    fail(
+      'INDEX_UNAVAILABLE',
+      `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
+    );
+  }
 }

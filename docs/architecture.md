@@ -1,9 +1,10 @@
 # Membrain architecture specification
 
-Status: Phase 5 portable skill packaging and explicit export, optional Git
-synchronization, initialization and local memory engine implemented. Reviewed
-2026-10-26. See [implementation-plan.md](implementation-plan.md) for delivery
-gates, [memory-engine.md](memory-engine.md) for implemented behavior, and
+Status: Phase 6 retrieval, reliability and release preparation, portable skill
+export, optional Git synchronization, initialization and local memory
+implemented. Reviewed 2026-10-26. See
+[implementation-plan.md](implementation-plan.md) for delivery gates,
+[memory-engine.md](memory-engine.md) for implemented behavior, and
 [initialization.md](initialization.md) for setup/preservation contracts,
 [git-synchronization.md](git-synchronization.md) for sync safety and
 limitations, [research.md](research.md) for validation and primary sources.
@@ -303,11 +304,13 @@ migrations are versioned, opt-in, and tested with older fixtures.
 
 ## Index and deterministic retrieval
 
-Before retrieval, validate and hash a scan of the source files, then refresh the
-projection under the index lock. Track a local manifest of revision paths and
-content hashes, not just file modification times. The simple initial strategy
-enumerates and hashes source files at invocation; benchmark its startup cost
-before optimizing verification. New revisions trigger a complete transactional
+Before retrieval, validate and hash a scan of the source files. Reuse a current
+projection through a read-only SQLite connection without cache writes or locks;
+refresh a missing/stale/damaged projection under the index lock. Track a local
+manifest of revision paths and content hashes, not just file modification times.
+The simple initial strategy enumerates and hashes source files at invocation
+with bounded asynchronous I/O; the measured synchronous-read experiment was
+slower and was discarded. New revisions trigger a complete transactional
 index-generation rebuild; changed immutable files are validated and reported as
 corruption rather than silently trusted. Detected invalid sources prevent normal
 recall from presenting a stale index as current. Concurrent files published
@@ -323,7 +326,11 @@ punctuation, deduplicate tokens, reject empty/tokenless queries, and impose
 documented query and result-size bounds. Raw FTS grammar can be a later explicit
 option.
 
-Ranking: `bm25(fts, 1.0, 0.5)` for content and tags, ascending (smaller scores
+English function words are dropped from mixed queries; `--literal` keeps every
+token for SQL and other technical queries. All-function-word queries retain
+their tokens. No domain-specific synonyms or inferred concepts are added.
+
+Ranking: `bm25(fts, 1.0, 2.0)` for content and tags, ascending (smaller scores
 are better), then stable memory ID ascending. Do not silently add recency,
 agent, or scope boosts. Use one transient/local combined projection for
 applicable stores so scores share a corpus; separately computed scope BM25
@@ -332,6 +339,13 @@ materialize only enabled global, selected project, and selected session
 partitions before ranking. A SQLite schema/tokenizer upgrade may change scores;
 ranking is deterministic for the same corpus, query, and SQLite version, not
 promised identical across engines.
+
+`--read-only` requires an already current, readable index for exactly the
+selected scope set and fails rather than performing maintenance. Source
+validation still runs; recall never mutates JSONL. See
+[performance.md](performance.md) and
+[release-readiness.md](release-readiness.md) for measurements, limitations, and
+remaining publication gates.
 
 `recall` searches enabled global plus current project and only the explicit
 session; no automatic all-project/all-session expansion. `search` has the same

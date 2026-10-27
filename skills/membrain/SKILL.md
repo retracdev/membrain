@@ -24,6 +24,19 @@ established decision. Prefer a small result limit and context budget:
 membrain recall "authentication database decisions" --limit 5 --max-chars 4000 --json
 ```
 
+Search is lexical: use concrete names such as `TypeScript`, `SQLite`, project
+names, or relevant tags. It cannot infer a programming language from a vague
+question about "technology". English function words are normally ignored; use
+`--literal` when they are part of a technical query, such as `WHERE EXISTS`.
+
+Recall never changes stored memories. It may create or refresh the disposable
+local SQLite index and its cache lock. With a current index, ordinary retrieval
+needs no cache writes. If filesystem writes are forbidden, use `--read-only`; it
+fails if the selected scopes need index maintenance. Report that error and
+continue without memory, or seek authorization for internal cache maintenance.
+Do not bypass filesystem restrictions, change cache permissions, or assume
+permission to save memories from permission to maintain the index.
+
 The default searches enabled global memory and the current configured project.
 Nested directories resolve to that project. Outside a configured project, only
 applicable global memory is searched. Use `--scope global` for developer-wide
@@ -73,8 +86,8 @@ use
 Superseded and deleted memories are excluded from current recall. For deliberate
 deletion requested by the user, use
 `membrain forget MEMORY_ID --scope project --expected-revision REVISION_ID --yes --json`.
-Deletion is a tombstone, not erasure of JSONL, backups, or Git history. Do not
-delete or promote memory just to clean up a session without the user's intent.
+History remains in source files, backups, and Git history. Do not delete or
+promote memory just to clean up a session without the user's intent.
 
 Use JSON results and respect nonzero errors. On a stale revision/conflict,
 retrieve current state and reconcile rather than retrying with a blind

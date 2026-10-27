@@ -6,6 +6,16 @@ import { test } from 'node:test';
 test('the runtime provides FTS5, parameter binding, and ascending BM25 relevance', () => {
   const db = new Database(':memory:');
   try {
+    const version = db
+      .prepare('SELECT sqlite_version()')
+      .pluck()
+      .get()
+      .split('.')
+      .map(Number);
+    assert.ok(
+      version[0] > 3 || (version[0] === 3 && version[1] >= 44),
+      'Read-only FTS integrity checking requires SQLite >=3.44.0',
+    );
     db.exec(
       'CREATE VIRTUAL TABLE probe USING fts5(content, tokenize = unicode61)',
     );

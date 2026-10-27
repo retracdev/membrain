@@ -108,7 +108,9 @@ export class MemoryEngine {
   }
   private async snapshots(selection: Selection): Promise<Snapshot[]> {
     const locations = await selectLocations(this.config, selection, this.cwd);
-    const snapshots = await Promise.all(locations.map(readStore));
+    const snapshots = await Promise.all(
+      locations.map((item) => readStore(item)),
+    );
     const ids = new Map<string, string>();
     const revisions = new Set<string>();
     for (const snapshot of snapshots)

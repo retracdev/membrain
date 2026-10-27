@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readFile, readdir } from 'node:fs/promises';
+import { readFile as readFileCallback } from 'node:fs';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import {
   fail,
@@ -18,6 +20,11 @@ import {
   withLock,
 } from './files.js';
 
+// One promise around callback readFile avoids FileHandle promise bookkeeping
+// for every open/stat/read/close of a small immutable revision. Concurrency and
+// source validation remain unchanged.
+const readRevisionBytes = promisify(readFileCallback);
+
 interface Manifest {
   schemaVersion: 1;
   storeId: string;
@@ -32,6 +39,11 @@ export interface Snapshot {
   fingerprint: string;
   hashes: { revisionId: string; hash: string }[];
   warnings: Warning[];
+}
+export interface ReplayTiming {
+  enumerationMs: number;
+  readValidateHashMs: number;
+  projectionMs: number;
 }
 function matches(
   value: { scope: string; projectId?: string; sessionId?: string },
@@ -111,7 +123,11 @@ async function mapLimit<T, R>(
   if (failed) throw failure;
   return result;
 }
-export async function readStore(location: Location): Promise<Snapshot> {
+export async function readStore(
+  location: Location,
+  timing?: ReplayTiming,
+): Promise<Snapshot> {
+  const started = performance.now();
   const manifest = await readManifest(location);
   const warnings: Warning[] = [];
   if (!manifest)
@@ -173,10 +189,12 @@ export async function readStore(location: Location): Promise<Snapshot> {
     },
   );
   files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  const enumerated = performance.now();
   const loaded = await mapLimit(files, async ({ file, id, revisionId }) => {
     try {
       await regularFile(file);
-      const bytes = await readFile(file);
+      const bytes = await readRevisionBytes(file);
+      if (bytes.length > 262_144) throw new Error('Oversized source');
       const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       const normalized = content.endsWith('\r\n')
         ? `${content.slice(0, -2)}\n`
@@ -201,6 +219,7 @@ export async function readStore(location: Location): Promise<Snapshot> {
       );
     }
   });
+  const validated = performance.now();
   const records = loaded.map((entry) => entry.record);
   const fingerprint = createHash('sha256')
     .update(JSON.stringify(manifest))
@@ -210,10 +229,16 @@ export async function readStore(location: Location): Promise<Snapshot> {
         .join('\n'),
     )
     .digest('hex');
+  const entries = projectHeads(records);
+  if (timing) {
+    timing.enumerationMs = enumerated - started;
+    timing.readValidateHashMs = validated - enumerated;
+    timing.projectionMs = performance.now() - validated;
+  }
   return {
     location,
     records,
-    entries: projectHeads(records),
+    entries,
     fingerprint,
     hashes: loaded.map(({ record, hash }) => ({
       revisionId: record.revisionId,

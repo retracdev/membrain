@@ -1,5 +1,41 @@
 # Release blockers and performance targets
 
+## Phase 6 status: publication blocked
+
+Current evidence and the 30-process large/small recall measurements are in
+[release-readiness.md](release-readiness.md), with repeatable methodology in
+[performance.md](performance.md). The warm CLI p95 <=1,000 ms and proposed
+cold-index <=10,000 ms gates stay open until actual measurements meet them on
+reference machines. Functional CI does not establish latency per OS.
+
+Healthy indexes now open read-only without cache writes or locks; `--read-only`
+refuses missing/stale/damaged indexes. The reported permission failure is
+resolved for current valid indexes without bypassing restrictions or changing
+source memories. Full source hashing and FTS/source recovery remain.
+
+Registry ownership is a separate blocker: `npm view membrain` returned the
+existing `membrain@1.0.0` registration on 2026-10-26. The owner must establish
+control or explicitly choose another namespace. No rename or publication was
+attempted. Keep `0.1.0-dev.0` and `private: true` pending separate
+authorization.
+
+The expanded CI matrix covers Windows/macOS/Linux on Node 24.15.0, latest 24,
+and 26, with actual archive installation and native SQLite checks. Observe its
+results before claiming platform verification. README and license remain
+unchanged. Publication, GitHub releases, merging, and integration installation
+are not authorized by a passing check.
+
+The remainder preserves the historical Phase 2–5 measurements and gate
+definition. For the current implementation and results use the Phase 6 reports
+above; historical single-query figures are not directly comparable to the new
+mixed-topic, 30-process corpus.
+
+Completed Phase 6 Windows results: **warm CLI p95 31,493 ms** over 30 processes,
+**cold-index CLI 18,187 ms** at 10,000 active memories / 20,000 revisions. Both
+gates fail. At 100 active memories / 200 revisions, warm median is 614 ms and
+p95 1,024 ms. These measurements preserve full hashing and normal desktop
+conditions; they do not establish a controlled speedup over Phase 2.
+
 ## Large-store retrieval: open, release-blocking
 
 Phase 2 measured approximately **18,955 ms for one warm engine query** on

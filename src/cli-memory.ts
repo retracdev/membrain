@@ -26,6 +26,8 @@ interface Options extends Selection {
   offset?: string;
   maxChars?: string;
   rebuildIndex?: boolean;
+  readOnly?: boolean;
+  literal?: boolean;
   promote?: string;
   to?: string;
 }
@@ -326,7 +328,7 @@ export function registerMemoryCommands(program: Command): void {
     program
       .command('forget')
       .argument('[id]')
-      .description('append a deletion tombstone; history is retained'),
+      .description('remove a memory from future searches; retain its history'),
     true,
   )
     .option('--yes', 'explicitly confirm logical deletion without a prompt')
@@ -341,7 +343,7 @@ export function registerMemoryCommands(program: Command): void {
     if (!options.yes)
       fail(
         'CONFIRMATION_REQUIRED',
-        'Deletion requires --yes. This writes a tombstone; it does not erase revision or Git history.',
+        'Deletion requires --yes. This memory will be removed from future searches. Its history will be retained for synchronization and recovery.',
       );
     const service = await engine();
     if (options.all) {
@@ -395,7 +397,13 @@ export function registerMemoryCommands(program: Command): void {
               : 'list memory heads or explicit revision history',
         ),
     );
-    if (name !== 'list') command = command.argument('<query>');
+    if (name !== 'list')
+      command = command
+        .argument('<query>')
+        .option(
+          '--literal',
+          'keep every query word, including English function words',
+        );
     command
       .option(
         '--limit <count>',
@@ -410,6 +418,10 @@ export function registerMemoryCommands(program: Command): void {
           ...(previous ?? []),
           tag,
         ],
+      )
+      .option(
+        '--read-only',
+        'reuse a current index without cache writes; fail if maintenance is needed',
       )
       .option(
         '--rebuild-index',
@@ -461,6 +473,10 @@ export function registerMemoryCommands(program: Command): void {
         ...(options.rebuildIndex === undefined
           ? {}
           : { rebuild: options.rebuildIndex }),
+        ...(options.readOnly === undefined
+          ? {}
+          : { readOnly: options.readOnly }),
+        ...(options.literal === undefined ? {} : { literal: options.literal }),
       });
       output(
         name === 'recall'

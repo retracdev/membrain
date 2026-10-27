@@ -821,6 +821,46 @@ test('Membrain Git commits disable configured repository hooks', async (t) => {
   success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
 });
 
+test('inherited Git repository redirection cannot change another checkout or index', async (t) => {
+  const f = await fixture(t);
+  f.clone();
+  const beforeHead = git(f.b, 'rev-parse', 'HEAD');
+  const beforeIndex = await readFile(path.join(f.b, '.git', 'index'));
+  await f.engineA.remember(
+    { scope: 'global' },
+    {
+      content:
+        'Keep repository and index selection inside the authorized scope',
+    },
+  );
+  const overrides = {
+    GIT_DIR: path.join(f.b, '.git'),
+    GIT_WORK_TREE: f.b,
+    GIT_INDEX_FILE: path.join(f.b, '.git', 'index'),
+  };
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  let report;
+  try {
+    Object.assign(process.env, overrides);
+    report = await synchronizeMemories(f.configA, { scope: 'global' }, f.a);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  success(report);
+  assert.notEqual(git(f.a, 'rev-parse', 'HEAD'), beforeHead);
+  assert.equal(git(f.b, 'rev-parse', 'HEAD'), beforeHead);
+  assert.deepEqual(
+    await readFile(path.join(f.b, '.git', 'index')),
+    beforeIndex,
+  );
+  assert.equal(git(f.b, 'status', '--porcelain'), '');
+});
+
 test('project markers and source files tolerate Git CRLF checkout conversion without changing identity', async (t) => {
   const f = await fixture(t, { seed: false });
   git(f.a, 'config', 'core.autocrlf', 'true');
