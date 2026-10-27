@@ -55,6 +55,11 @@ export async function validateDirectory(
       await access(cursor, constants.W_OK | constants.X_OK);
       return canonical(input);
     } catch (error) {
+      if (errno(error) === 'ENOTDIR')
+        fail(
+          'INVALID_PATH',
+          `A file blocks the directory path at ${input}. Choose a directory location.`,
+        );
       if (errno(error) !== 'ENOENT') {
         if (['EACCES', 'EPERM', 'EROFS'].includes(errno(error) ?? ''))
           fail(

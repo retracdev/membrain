@@ -47,6 +47,13 @@ Windows checkouts. An isolated checkout with `core.autocrlf=true` verified LF
 source, docs and CI files. README, LICENSE and personal memory paths have no new
 attributes; their contents are untouched.
 
+The first Linux/macOS CI executions exposed a pre-existing initialization error
+classification difference: `lstat` reports `ENOTDIR` for a directory below a
+regular file on POSIX, while Windows can report `ENOENT`. Initialization now
+normalizes the POSIX case to the existing `INVALID_PATH` contract. The existing
+invalid-path preservation fixture covers both direct validation and CLI use; its
+assertions were kept strict.
+
 Added isolated regression coverage for human export into a mocked agent skill
 directory, preservation of a hard-linked neighboring file, missing packaged
 assets before directory creation or replacement, and literal option-like memory

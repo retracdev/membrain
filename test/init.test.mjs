@@ -372,6 +372,10 @@ test('invalid paths, overlapping roots, protected files, malformed config and ma
   const f = await fixture(t);
   const blocked = path.join(f.directory, 'blocked');
   await writeFile(blocked, 'owner bytes');
+  await assert.rejects(validateDirectory(path.join(blocked, 'child')), {
+    code: 'INVALID_PATH',
+  });
+  assert.equal(await readFile(blocked, 'utf8'), 'owner bytes');
   error(
     f.run(
       'init',
