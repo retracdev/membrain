@@ -1,0 +1,55 @@
+{
+  "name": "membrain",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "description": "Your agents change. Their memory shouldn't. Local-first memory for coding agents.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "membrain": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "docs/",
+    "skills/membrain/SKILL.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run build && node --test",
+    "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "demo": "npm run build && node scripts/demo.mjs",
+    "demo:init": "npm run build && node scripts/demo-init.mjs",
+    "demo:sync": "npm run build && node scripts/demo-sync.mjs",
+    "demo:skill": "npm run build && node scripts/demo-skill.mjs",
+    "check:ownership": "node scripts/check-ownership.mjs",
+    "check": "npm run check:ownership && npm run format:check && npm run lint && npm run typecheck && npm test",
+    "pack:check": "npm run build && node scripts/check-package.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.4",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@inquirer/testing": "^3.3.15",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true
+  }
+}

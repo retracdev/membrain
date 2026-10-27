@@ -1,0 +1,20 @@
+# Keep application/tooling files consistent with Prettier on every checkout.
+# Root README, LICENSE and personal memory are deliberately outside these rules.
+/.editorconfig text eol=lf
+/.gitattributes text eol=lf
+/.gitignore text eol=lf
+/.prettierignore text eol=lf
+/.prettierrc.json text eol=lf
+/AGENTS.md text eol=lf
+/CONTRIBUTING.md text eol=lf
+/eslint.config.mjs text eol=lf
+/package.json text eol=lf
+/package-lock.json text eol=lf
+/tsconfig.json text eol=lf
+/.github/** text eol=lf
+/docs/** text eol=lf
+/fixtures/** text eol=lf
+/scripts/** text eol=lf
+/skills/** text eol=lf
+/src/** text eol=lf
+/test/** text eol=lf
