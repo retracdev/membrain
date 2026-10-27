@@ -50,6 +50,9 @@ explicit rebuild, current read-only retrieval, and byte-identical, idempotent
 skill export. No TypeScript, ESLint, or Prettier runtime installation was
 present. Both dry-run and actual archive allowlists exclude tests, fixtures,
 personal memories, caches, SQLite, locks, credentials and user configuration.
+The archive harness resolves the temporary root before creating its fixture so
+macOS's `/var` alias does not trigger the skill export symlink protection. The
+export protection itself remains unchanged.
 
 The full check includes ownership, formatting, lint, strict types, production
 build and all `node:test` unit, CLI, initialization, memory, concurrency/crash,

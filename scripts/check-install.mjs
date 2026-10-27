@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -17,8 +18,11 @@ import { fileURLToPath, URL } from 'node:url';
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('Run through npm run install:check.');
 const root = fileURLToPath(new URL('../', import.meta.url));
-const directory = await mkdtemp(path.join(os.tmpdir(), 'membrain-install-'));
-assert.equal(path.dirname(directory), os.tmpdir());
+// macOS can expose its temporary directory through /var -> /private/var.
+// Export intentionally rejects linked ancestors; give it the real fixture path.
+const temporaryRoot = await realpath(os.tmpdir());
+const directory = await mkdtemp(path.join(temporaryRoot, 'membrain-install-'));
+assert.equal(path.dirname(directory), temporaryRoot);
 try {
   const prefix = path.join(directory, 'isolated prefix');
   const cwd = path.join(directory, 'outside source repository');
