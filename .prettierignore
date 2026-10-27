@@ -1,0 +1,9 @@
+# Owner-maintained. Never format the root README.
+/README.md
+/LICENSE
+/node_modules/
+/dist/
+/coverage/
+/.membrain/
+/package-lock.json
+*.tgz
