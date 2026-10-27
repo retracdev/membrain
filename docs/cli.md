@@ -50,6 +50,15 @@ Codes include `INVALID_CONFIG`, `CONFIG_READ_FAILED`, `USAGE_ERROR`,
 matching prose. Current memory envelopes are documented in `memory-engine.md`;
 pre-release output is not yet a stable public API.
 
+## Retrieval options
+
+Retrieval options: `recall`, `search`, and `list` accept `--read-only` to
+require a current SQLite index without cache writes. It cannot be combined with
+`--rebuild-index`. Ordinary reads also avoid cache writes when the index is
+current. These flags never authorize source mutations. Search and recall accept
+`--literal` to keep English function words in technical queries; see
+[search-relevance.md](search-relevance.md).
+
 ## Portable skill export
 
 `membrain skill export --output DIRECTORY [--overwrite] [--json]` exports only

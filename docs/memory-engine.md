@@ -3,10 +3,11 @@
 Membrain now stores and retrieves memories offline. `remember`, `recall`,
 `search`, `list`, `update`, and `forget` are implemented. Phase 3 adds
 [interactive/non-interactive init](initialization.md); Phase 4 adds optional
-[Git synchronization](git-synchronization.md). Agent installation and `doctor`
-remain future work. Internal MemoryEngine calls stay local; the CLI performs
-authorized automatic attempts after successful mutations. Local/manual memory
-commands still invoke no Git; project detection inspects filesystem markers.
+[Git synchronization](git-synchronization.md). Agent installation is manual;
+`doctor` remains planned. Internal MemoryEngine calls stay local; the CLI
+performs authorized automatic attempts after successful mutations. Local/manual
+memory commands still invoke no Git; project detection inspects filesystem
+markers.
 
 ## Configuration and a complete example
 
@@ -92,6 +93,14 @@ There is no implicit all-session search.
 Search, recall, and list accept `--rebuild-index`. Rebuilding validates JSONL
 before replacing any index generation. It does not modify source records, repair
 corruption, or resolve conflicts.
+
+All three also accept `--read-only`. A current index is reused without internal
+cache writes or locks, including ordinary queries without this flag. With the
+flag, a missing, stale, or damaged index fails with `INDEX_READ_ONLY` instead of
+requesting maintenance. It cannot be combined with `--rebuild-index`. Each
+selected scope set needs its own current index. Source files are still fully
+read and validated; this option is not a stale-cache fallback or a bypass of
+filesystem permissions. Reads may update OS access times.
 
 JSON writes return `{record,replayed,deduplicated,warnings}`. Search/list return
 `{untrusted,results,index,warnings}`; each result contains `record`,
@@ -208,7 +217,8 @@ repository tooling and never staged by Membrain.
 Each read enumerates and validates selected JSONL history and hashes actual
 content, not just timestamps. LF/CRLF record terminators are normalized for
 fingerprints so Git line-ending conversion does not look like changed memory. An
-unchanged fingerprint reuses its SQLite index. Changed/new sources rebuild a
+unchanged fingerprint reuses its SQLite index through a read-only connection,
+without taking an index lock or writing a journal. Changed/new sources rebuild a
 complete transactional generation, validate it, close it, and atomically replace
 the old derived file under an index lock. A missing/damaged/incompatible SQLite
 database is rebuilt automatically; damaged JSONL fails the read and is
@@ -218,13 +228,20 @@ signatures against a malicious local file editor.
 
 FTS5 uses `unicode61`, default diacritic folding, and no stemming. Queries are
 NFC-normalized, lowercased, split into Unicode letter/number/mark tokens,
-deduped, quoted literally, and OR-combined. Raw FTS grammar is never accepted.
+deduped, quoted literally, and OR-combined. English function words are removed
+from mixed queries; all-function-word queries retain their tokens. `--literal`
+on search/recall preserves all tokens, including SQL words and technical
+identifiers that overlap with stopwords. Raw FTS grammar is never accepted.
 Limits: 2048 query characters and 64 distinct tokens. Ranking is
-`bm25(fts, 1.0, 0.5)` (content/tags), ascending, then memory UUID in binary
+`bm25(fts, 1.0, 2.0)` (content/tags), ascending, then memory UUID in binary
 order. Only active non-conflicting heads contribute to the FTS corpus. Exact tag
 filters select results within that corpus without recomputing BM25 statistics.
 The same query/corpus/SQLite version has deterministic scores; engine upgrades
-may change them. There are no recency/scope boosts or semantic inference.
+may change them. There are no recency/scope boosts or semantic inference. Names
+such as TypeScript and SQLite work directly; a question about a preferred
+"technology" cannot identify a language memory with no shared terms. Prefer
+specific keywords and deliberate tags. See
+[search-relevance.md](search-relevance.md).
 
 Writes publish JSONL before refreshing the derived index. If index refresh
 fails, the write still returns its saved record and an `INDEX_PENDING` warning.
@@ -245,8 +262,9 @@ another memory under a different operation ID to repair an index.
   revision is unrecoverable if no copy/history remains.
 - Reads hash all selected history, and a changed corpus rebuilds the full
   derived index. This favors integrity/simplicity over constant-time startup.
-  The [Phase 2 validation report](phase-2-validation.md) records the
-  10,000-memory benchmark and the remaining performance work before release.
+  [performance.md](performance.md) records the Phase 6 measurements and
+  remaining performance gate. Bounded asynchronous reads keep lock heartbeats
+  responsive; no daemon or idle process is added.
 - Concurrent reads observe a validated scan, not a global transaction spanning
   all stores. Revisions published after enumeration appear on the next command.
 - Memory-command human output is indented JSON. Setup has a separate interactive

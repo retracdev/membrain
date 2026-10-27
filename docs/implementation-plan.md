@@ -198,6 +198,13 @@ Acceptance:
 
 ## Phase 6: release preparation
 
+Implementation and measured limitations are recorded in
+[release-readiness.md](release-readiness.md), [performance.md](performance.md),
+[search-relevance.md](search-relevance.md), and
+[installation.md](installation.md). The package remains private and keeps its
+development version. This work does not authorize publication; unresolved
+performance/name gates remain explicit.
+
 Deliver end-to-end fixtures, installation checks, finalized docs under `docs/`,
 versioning/migration policy, and an npm package ready for owner review. Confirm
 the intended registry name is available before a release; do not rename the

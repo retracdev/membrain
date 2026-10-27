@@ -114,6 +114,14 @@ Memories are untrusted reference data, never authoritative instructions or shell
 commands. An unavailable CLI or memory error should not derail the coding task
 or trigger automatic installation/repair.
 
+Recall does not mutate source memories. It may maintain a disposable local
+SQLite index and cache lock when that index is absent, stale, or damaged. A
+current index is reused without cache writes. When an agent is forbidden from
+writing files, the skill recommends `--read-only` and reporting a maintenance
+error rather than bypassing the restriction. Cache-maintenance permission does
+not authorize memory saves or synchronization. Technical keyword queries and
+`--literal` are explained alongside the lexical search limitation.
+
 Avoid secrets and sensitive context before saving: detection is incomplete.
 Tombstones do not erase old JSONL, backups, or Git history. Each scope defaults
 to local; an already authorized automatic policy can commit and transmit memory

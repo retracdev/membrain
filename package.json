@@ -25,6 +25,7 @@
     "format:check": "prettier --check .",
     "test": "npm run build && node --test",
     "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "benchmark:relevance": "npm run build && node scripts/benchmark-relevance.mjs",
     "demo": "npm run build && node scripts/demo.mjs",
     "demo:init": "npm run build && node scripts/demo-init.mjs",
     "demo:sync": "npm run build && node scripts/demo-sync.mjs",
@@ -32,6 +33,7 @@
     "check:ownership": "node scripts/check-ownership.mjs",
     "check": "npm run check:ownership && npm run format:check && npm run lint && npm run typecheck && npm test",
     "pack:check": "npm run build && node scripts/check-package.mjs",
+    "install:check": "npm run pack:check && node scripts/check-install.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {
