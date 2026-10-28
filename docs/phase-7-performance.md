@@ -269,14 +269,15 @@ After (n=30), milliseconds:
 ## Validation and readiness
 
 Clean `npm ci` passed with no dependency/lockfile changes. `npm run check`
-passed on Windows: **103 tests, 100 passed, three existing POSIX-only skips,
-zero failures**, including formatting, lint, strict types, build, CLI, memory,
-concurrency/crash, permissions, skill and Git regression suites. New tests cover
-large-store deterministic replay, the process-wide worker cap/drain,
-worker-denied full replay, source tampering, external tombstones, physical
-source removal, selected-scope isolation and rebuild equivalence. The npm test
-command explicitly discovers `test/**/*.test.mjs`, excluding generated
-validation copies without removing any repository test.
+passed on Windows after the lock follow-up: **105 tests, 102 passed, three
+existing POSIX-only skips, zero failures**, including formatting, lint, strict
+types, build, CLI, memory, concurrency/crash, permissions, skill and Git
+regression suites. New tests cover large-store deterministic replay, the
+process-wide worker cap/drain, worker-denied full replay, source tampering,
+external tombstones, physical source removal, selected-scope isolation and
+rebuild equivalence. The npm test command explicitly discovers
+`test/**/*.test.mjs`, excluding generated validation copies without removing any
+repository test.
 
 `npm run install:check` and `pack:check` passed with 50 allowlisted archive
 files. An actual archive installed into a disposable global prefix passed native
@@ -288,9 +289,34 @@ regressions; the separate known semantic example remains unsolved.
 The existing functional CI matrix covers Windows/macOS/Linux on Node 24.15.0,
 latest 24 and 26. A separate three-OS Node 24 performance job reports the
 100/1,000/10,000-memory batches as artifacts, without flaky latency assertions
-in functional tests. Local validation is Windows only; inspect the PR's actual
-CI results before claiming other platforms passed. Hosted-runner measurements
-are not reference-machine guarantees.
+in functional tests. Local validation is Windows only. The PR run on `0939351`
+passed all nine functional matrix jobs and all three performance jobs:
+
+| Hosted platform | Node    | 10k warm n | p50 ms | p95 ms | p99/max ms | Profile peak RSS KiB |
+| --------------- | ------- | ---------: | -----: | -----: | ---------: | -------------------: |
+| Linux x64       | 24.22.1 |         30 |    778 |    829 |        925 |               270232 |
+| macOS arm64     | 24.21.0 |         30 |   1072 |   1608 |       1678 |               253824 |
+| Windows x64     | 24.22.1 |         30 |   1725 |   1938 |       2343 |               249804 |
+
+Reports are attached to
+[CI run 40612542698](https://github.com/retracdev/membrain/actions/runs/40612542698).
+These are different machines with no corresponding pre-change baseline; they are
+portability/scale observations, not controlled speedups or reference-machine
+guarantees. Linux passing one hosted batch does not clear the reference-machine
+gate or the Windows/macOS latency concerns.
+
+The duplicate push run on the same commit failed one Windows/Node 26 concurrent
+writer test: lock-directory `mkdir` returned `EPERM`. The PR run passed the same
+test. A follow-up bounds retries of Windows `EPERM` by the existing acquisition
+timeout, covering delete-pending contention without assuming ownership, removing
+another lock or changing permissions. Persistent `EPERM` still propagates after
+the deadline; `EACCES` and non-Windows `EPERM` still propagate immediately.
+Deterministic tests inject transient and persistent permission errors; all
+actions require successful `mkdir` and the existing ownership token checks. This
+does not change the warm read path or the recorded benchmark observations. The
+observed error is consistent with Windows deletion waiting for open handles
+([Microsoft's directory deletion contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-removedirectorya));
+the precise OS cause of that individual hosted failure was not traced.
 
 Source JSONL, schema-version-1 config, immutable history, Git safety and lexical
 ranking remain compatible. Root README and MIT LICENSE retain their initial

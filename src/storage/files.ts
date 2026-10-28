@@ -110,7 +110,12 @@ export async function withLock<T>(
       await mkdir(lock, { mode: 0o700 });
       break;
     } catch (error) {
-      if (errno(error) !== 'EEXIST') throw error;
+      const code = errno(error);
+      // Windows may report EPERM while a competing rmdir is delete-pending.
+      // Retry mkdir itself; never assume ownership or remove another lock.
+      const pendingDelete = process.platform === 'win32' && code === 'EPERM';
+      if (code !== 'EEXIST' && !pendingDelete) throw error;
+      if (pendingDelete && Date.now() - start >= timeoutMs) throw error;
       if (Date.now() - start >= timeoutMs)
         fail(
           'LOCK_BUSY',
