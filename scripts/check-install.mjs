@@ -12,6 +12,8 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
+import { parseConfig } from '../dist/config.js';
+import { populateFixture } from '../fixtures/performance-store.mjs';
 
 // Every npm write, configuration file, install prefix, and memory is disposable.
 // This never installs over the user's global Membrain command.
@@ -165,6 +167,67 @@ try {
     await readFile(path.join(root, 'skills', 'membrain', 'SKILL.md'), 'utf8'),
   );
   assert.deepEqual(await readdir(destination), ['SKILL.md']);
+  const largeConfigFile = path.join(directory, 'large config.json');
+  const largeValue = {
+    version: 1,
+    global: { path: path.join(directory, 'large synthetic store') },
+  };
+  await writeFile(largeConfigFile, JSON.stringify(largeValue));
+  await populateFixture(parseConfig(largeValue, largeConfigFile), cwd, 1000, [
+    { scope: 'global' },
+  ]);
+  const workerProbe = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      new URL('./profile-recall.mjs', import.meta.url).href,
+      entry,
+      '--config',
+      largeConfigFile,
+      '--json',
+      'recall',
+      'sqlite',
+      '--scope',
+      'global',
+    ],
+    { cwd, env: cliEnv, encoding: 'utf8', timeout: 240000 },
+  );
+  assert.equal(
+    workerProbe.status,
+    0,
+    workerProbe.stderr || String(workerProbe.error),
+  );
+  assert.equal(JSON.parse(workerProbe.stdout).index.revisions, 2000);
+  const profileLines = workerProbe.stderr
+    .split('\n')
+    .filter((line) => line.startsWith('MEMBRAIN_PROFILE '));
+  assert.equal(profileLines.length, 1);
+  const workerProfile = JSON.parse(profileLines[0].slice(17));
+  assert.equal(workerProfile.spans['store.workerStart'].calls, 8);
+  assert.equal(workerProfile.spans['store.workerExit'].calls, 8);
+  assert.equal(workerProfile.spans['store.validationCpu'].calls, 2000);
+  assert.equal(workerProfile.spans['store.workerFallback'], undefined);
+  const largeWarm = JSON.parse(
+    run(
+      process.execPath,
+      [
+        entry,
+        '--config',
+        largeConfigFile,
+        '--json',
+        'recall',
+        'sqlite',
+        '--scope',
+        'global',
+        '--read-only',
+      ],
+      cwd,
+      undefined,
+      cliEnv,
+    ),
+  );
+  assert.equal(largeWarm.index.rebuilt, false);
+  assert.equal(largeWarm.index.revisions, 2000);
   // npm omits dev dependencies from a packed global install.
   const dependencyRoots = [
     path.join(
@@ -198,6 +261,7 @@ try {
         rememberRecall: 'passed',
         rebuild: 'passed',
         readOnly: 'passed',
+        installedReplayWorkers: 'passed',
         skillExport: 'passed',
         devDependencies: 'absent',
         published: false,

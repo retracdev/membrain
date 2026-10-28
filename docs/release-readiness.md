@@ -1,9 +1,12 @@
 # Phase 6 release readiness
 
-Status: **publication blocked**. Keep `0.1.0-dev.0` and `private: true`.
-Recommend `0.1.0` for the first public release under a confirmed registry name
-after the remaining gates pass. This assessment does not authorize publication,
-a GitHub release, merging, integration installation, or infrastructure.
+Status: **publication blocked**. Keep `0.1.0-dev.0` and `private: true`. For
+subsequent replay performance work and validation, see
+[phase-7-performance.md](phase-7-performance.md); the Phase 6 evidence here is
+preserved as historical context. Recommend `0.1.0` for the first public release
+under a confirmed registry name after the remaining gates pass. This assessment
+does not authorize publication, a GitHub release, merging, integration
+installation, or infrastructure.
 
 ## Resolved issues
 

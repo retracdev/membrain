@@ -177,6 +177,28 @@ test('deep FTS corruption is checked without writing the cache and recovers from
   assert.ok(recovered.warnings.some((item) => item.code === 'INDEX_RECOVERED'));
 });
 
+test('an unchanged fingerprint cannot hide a missing index provenance table', async (t) => {
+  const f = await fixture(t);
+  const db = new Database(f.index);
+  try {
+    db.exec('DROP TABLE hashes');
+  } finally {
+    db.close();
+  }
+  await assert.rejects(f.query({ readOnly: true }), {
+    code: 'INDEX_READ_ONLY',
+  });
+  const repaired = await f.query();
+  assert.equal(repaired.index.rebuilt, true);
+  assert.equal(repaired.results[0].record.id, f.saved.record.id);
+  assert.ok(repaired.warnings.some(({ code }) => code === 'INDEX_RECOVERED'));
+  const original = await readFile(f.source, 'utf8');
+  const stat = await lstat(f.source);
+  await writeFile(f.source, original.replace('immutable', 'rewritten'));
+  await utimes(f.source, stat.atime, stat.mtime);
+  await assert.rejects(f.query(), { code: 'CORRUPT_STORE' });
+});
+
 test('index replacement tolerates another read-only connection holding a generation', async (t) => {
   const f = await fixture(t);
   const reader = new Database(f.index, { readonly: true });

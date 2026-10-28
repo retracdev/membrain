@@ -5,6 +5,7 @@ import type { Config, ProjectConfig } from '../config.js';
 import { canonical, contains, errno } from '../storage/files.js';
 import { choice, fail, isObject, scopes, text } from './model.js';
 import type { Scope } from './model.js';
+import { span } from '../profile.js';
 
 export interface Selection {
   scope?: string;
@@ -177,7 +178,9 @@ export async function selectLocations(
       'INVALID_SELECTION',
       '--session requires session scope or the default multi-scope read.',
     );
+  const finishProject = span('engine.projectDetection');
   const project = await currentProject(config, cwd, options.project);
+  finishProject();
   if (write && scope === undefined && !project)
     fail(
       'SCOPE_REQUIRED',

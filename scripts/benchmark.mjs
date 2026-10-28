@@ -56,6 +56,7 @@ function summary(values) {
     samples: values.length,
     medianMs: percentile(0.5),
     p95Ms: percentile(0.95),
+    p99Ms: percentile(0.99),
     maxMs: percentile(1),
     valuesMs: values.map(Math.round),
   };
@@ -83,6 +84,7 @@ try {
   const configValue = { version: 1, global: { path: source } };
   await writeFile(configFile, JSON.stringify(configValue));
   let next = 0;
+  let prepared = 0;
   await Promise.all(
     Array.from({ length: 16 }, async () => {
       while (next < count) {
@@ -127,6 +129,9 @@ try {
             `${JSON.stringify(current)}\n`,
           ),
         ]);
+        prepared++;
+        if (count >= 10000 && prepared % 5000 === 0)
+          console.error(`Prepared ${prepared}/${count} synthetic memories.`);
       }
     }),
   );
@@ -172,14 +177,28 @@ try {
     }),
   );
   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
-  function recall() {
+  const profiler = new URL('./profile-recall.mjs', import.meta.url).href;
+  function recall(profile = false) {
     const start = performance.now();
     const cliResult = spawnSync(
       process.execPath,
-      [cli, '--config', configFile, '--json', 'recall', 'sqlite'],
+      [
+        ...(profile ? ['--import', profiler] : []),
+        cli,
+        '--config',
+        configFile,
+        '--json',
+        'recall',
+        'sqlite',
+      ],
       {
         cwd: directory,
-        env: { ...process.env, PATH: '', MEMBRAIN_CACHE_DIR: cache },
+        env: {
+          ...process.env,
+          NODE_OPTIONS: '',
+          PATH: '',
+          MEMBRAIN_CACHE_DIR: cache,
+        },
         encoding: 'utf8',
         timeout: 180_000,
       },
@@ -194,12 +213,32 @@ try {
       Math.min(5, Math.ceil((count - 1) / topics.length))
     )
       throw new Error('Unexpected result count.');
-    return { elapsedMs: performance.now() - start, data };
+    const profileLine = cliResult.stderr
+      .split('\n')
+      .find((line) => line.startsWith('MEMBRAIN_PROFILE '));
+    return {
+      elapsedMs: performance.now() - start,
+      data,
+      profile: profileLine
+        ? JSON.parse(profileLine.slice('MEMBRAIN_PROFILE '.length))
+        : undefined,
+    };
+  }
+  const startupMs = [];
+  for (let sample = 0; sample < samples; sample++) {
+    const started = performance.now();
+    const result = spawnSync(process.execPath, [cli, '--version'], {
+      cwd: directory,
+      env: { ...process.env, NODE_OPTIONS: '', PATH: '' },
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) throw new Error(result.stderr);
+    startupMs.push(performance.now() - started);
   }
   console.error(
     'Measuring first CLI recall with no index (OS caches are not evicted)...',
   );
-  const cold = recall();
+  const cold = recall(true);
   console.error(`Cold CLI recall: ${Math.round(cold.elapsedMs)} ms`);
   if (!cold.data.index.rebuilt)
     throw new Error('Cold recall did not build its index.');
@@ -216,6 +255,21 @@ try {
     );
   }
   console.error(JSON.stringify({ warmCliRecall: summary(warmMs) }));
+  const warmProfile = recall(true).profile;
+  // Keep additional cold sampling outside the fixed-corpus warm batch.
+  const coldMs = [];
+  for (let sample = 0; sample < 3; sample++) {
+    if (path.dirname(cache) !== directory)
+      throw new Error('Unsafe cache cleanup path.');
+    await rm(cache, { recursive: true, force: true });
+    const current = recall();
+    if (!current.data.index.rebuilt)
+      throw new Error('Cold recall did not rebuild.');
+    coldMs.push(current.elapsedMs);
+    console.error(
+      `Cold CLI recall ${sample + 1}/3: ${Math.round(current.elapsedMs)} ms`,
+    );
+  }
   console.error('Measuring durable save and next visible recall...');
   start = performance.now();
   const saved = await engine.remember(
@@ -256,7 +310,12 @@ try {
         indexBuildAndQueryMs: Math.round(indexBuildAndQueryMs),
         indexReuseAndQueryMs: Math.round(indexReuseAndQueryMs),
         coldCliRecallMs: Math.round(cold.elapsedMs),
+        coldCliRecall: summary(coldMs),
         warmCliRecall: summary(warmMs),
+        cliStartup: summary(startupMs),
+        coldProfile: cold.profile,
+        warmProfile,
+        benchmarkPeakRssKiB: process.resourceUsage().maxRSS,
         saveWithIndexMs: Math.round(saveMs),
         nextQueryMs: Math.round(nextQueryMs),
         recallResults: cold.data.results.length,

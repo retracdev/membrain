@@ -15,6 +15,10 @@ const [{ files }] = JSON.parse(output);
 const paths = files.map((file) => file.path);
 for (const required of [
   'dist/cli.js',
+  'dist/storage/replay.js',
+  'dist/storage/replay-worker.js',
+  'dist/storage/revision.js',
+  'dist/profile.js',
   'package.json',
   'LICENSE',
   'docs/quick-start.md',

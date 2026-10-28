@@ -1,11 +1,11 @@
 # Membrain architecture specification
 
-Status: Phase 6 retrieval, reliability and release preparation, portable skill
-export, optional Git synchronization, initialization and local memory
-implemented. Reviewed 2026-10-26. See
-[implementation-plan.md](implementation-plan.md) for delivery gates,
-[memory-engine.md](memory-engine.md) for implemented behavior, and
-[initialization.md](initialization.md) for setup/preservation contracts,
+Status: Phase 7 source replay performance work, Phase 6 reliability and release
+preparation, portable skill export, optional Git synchronization, initialization
+and local memory implemented. Reviewed 2026-10-27. Performance remains
+release-blocking. See [implementation-plan.md](implementation-plan.md) for
+delivery gates, [memory-engine.md](memory-engine.md) for implemented behavior,
+and [initialization.md](initialization.md) for setup/preservation contracts,
 [git-synchronization.md](git-synchronization.md) for sync safety and
 limitations, [research.md](research.md) for validation and primary sources.
 

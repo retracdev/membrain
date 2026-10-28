@@ -8,6 +8,9 @@ import { registerInitCommand } from './cli-init.js';
 import { registerSyncCommand } from './cli-sync.js';
 import { registerSkillCommand } from './cli-skill.js';
 import { errno } from './storage/files.js';
+import { span } from './profile.js';
+
+const finishCommand = span('cli.command');
 
 const metadata = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -130,3 +133,4 @@ try {
     process.exitCode = failure.exitCode;
   }
 }
+finishCommand();

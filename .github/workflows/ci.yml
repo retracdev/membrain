@@ -31,3 +31,28 @@ jobs:
       - run: npm run pack:check
       - run: npm run install:check
       - run: npm run benchmark:relevance
+
+  performance:
+    # Reports observations on hosted runners. Strict latency is an explicit
+    # benchmark-suite --gate invocation on a declared reference machine.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run benchmark:suite -- ci 100,1000,10000 30
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: performance-${{ matrix.os }}
+          path: coverage/performance/
