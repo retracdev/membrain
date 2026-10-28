@@ -1,10 +1,109 @@
 # Index freshness and consistency
 
-JSONL revisions remain authoritative. SQLite is a local, disposable projection,
-not evidence that source files are unchanged. There is no persistent process,
-filesystem watcher, source metadata cache, or background refresh.
+JSONL revisions remain authoritative. SQLite is a local, disposable projection.
+Phase 8 adds explicit `--verification fast`; **strict remains the default**,
+including existing callers and the portable skill. No daemon, watcher,
+expiration window, background refresh, or cooperative source journal exists.
 
-## Verification on every read
+## Choosing verification
+
+```sh
+membrain recall "SQLite decisions" --verification fast
+membrain recall "SQLite decisions" --verification strict
+```
+
+The option also applies to `search` and `list`. JSON `index.verification`
+records the effective mode. `--rebuild-index` always verifies all source bytes,
+even in fast mode. Configuration and JSONL remain schema 1; disposable SQLite is
+schema 2.
+
+Strict preserves every-read byte verification. Fast is an explicit choice for
+immutable revision workflows: it detects actual new/removed paths each
+invocation and verifies bytes of every returned revision. It **cannot prove
+unreturned, previously indexed bytes are unchanged**. In-place edits to
+unreturned revisions can affect graph/search freshness until strict verification
+or rebuild. There is no time-based bound. Run strict after editing existing
+files or when auditing provenance. Fast results are not a complete authoritative
+integrity audit.
+
+## Fast path and incremental maintenance
+
+1. Resolve canonical selected stores and validate manifests. Checkpoints bind
+   scope/path/store identity to hostname/platform and root device/inode/birth
+   time. Changed bindings/manifests force full verification; caches are local.
+2. Read a compatible checkpoint in a SQLite read transaction, check database/FTS
+   integrity, aggregate hash-inventory completeness and a digest of cached
+   record JSON. Missing, damaged or incompatible checkpoints require full
+   replay. Store validated revision JSON, hashes and manifest identities in the
+   disposable database.
+3. Enumerate actual memory directories and revision filenames every invocation.
+   Reject unexpected paths/symlinks and report unpublished files. No timestamp
+   or size is freshness evidence: restored directory times cannot hide new
+   updates/tombstones. Work remains proportional to directories/revision names,
+   but historical files need no open/read/hash. Large stores use the existing
+   bounded temporary workers, with ordinary bounded traversal if workers are
+   unavailable.
+4. Read/decode/validate/hash additions. Reuse validated history only for paths
+   still present. Validate the resulting complete graph and cross-store IDs. If
+   an indexed revision disappears while its memory retains other revisions, fail
+   rather than expose an earlier head. Entire removed memories leave the corpus.
+   Without a prior cache, past removals/edits cannot be reconstructed.
+5. Copy compatible SQLite into a private generation under the maintenance lock.
+   Transactionally update hash rows and only affected memory/FTS projections;
+   commit fingerprint/checkpoint together. Check SQLite/FTS integrity, close and
+   atomically replace the generation, retaining bounded Windows sharing retries.
+   JSON `index.updated` denotes incremental maintenance; `index.rebuilt` denotes
+   a complete rebuild.
+6. Query FTS/BM25 in a consistent read transaction. Reread actual JSONL for
+   every hit, validate it and compare normalized hashes, then return the freshly
+   decoded record. Altered/unreadable hit bytes fail retrieval. This cannot find
+   an unreturned in-place edit that makes a previously irrelevant record newly
+   relevant: use strict for that guarantee.
+
+Git pulls, additive merges, revision-adding conflict resolution, independent
+agents and older clients change the inventory directly. No Git HEAD shortcut or
+Git executable is needed during recall. In-place edits during conflict
+resolution require strict verification. Malformed new files, incomplete JSONL,
+unresolved semantic heads and unexpected paths are never silently accepted. Sync
+retains complete replay, secret scans, exact-path allowlists, policy
+authorization and hook/filter refusal. No sync source layout or safety rule
+changes.
+
+Writes still verify all source history under their store lock before publishing
+immutable JSONL. Post-save projection advances that verified writer snapshot
+with the published revision, avoiding a second history replay while retaining
+prior hash comparisons. It uses incremental maintenance; failure retains the
+durable save with INDEX_PENDING. Queries begun after publication observe new
+paths; overlapping writes can appear on this read or the next. An index
+advancing ahead of a scan can trigger bounded rescans; sustained change fails
+safely. There is no atomic transaction across stores/external checkouts.
+
+## Recovery and permissions
+
+Missing, incompatible/corrupted indexes and explicit rebuilds require complete
+authoritative replay. No partial replay is published. Updates use private
+copies: a crash leaves the old or new complete published generation, never a hot
+journal beside the published index. Unpublished cache generations are never
+selected by discovery and may be removed with the cache. Killed lock owners
+require existing manual owner-inspection recovery; locks are never stolen.
+Source temporaries remain intact.
+
+Unchanged queries reuse caches read-only without cache locks/writes.
+`--read-only` refuses maintenance. Permission errors never authorize stale
+fallback or bypass. Fast verifies directory traversal and returned-file access
+rather than opening every unreturned historical file. POSIX modes and Windows
+ACL fixtures cover available permission behavior. Network/cloud-folder locking
+limits remain.
+
+Immediate detection of arbitrary same-name historical byte edits requires
+reading the bytes on portable filesystems. Timestamps, watcher events, Git
+checkpoints and cooperative journals cannot prove their absence. Compact sources
+could reduce file count but require migration and merge design. Explicit fast
+mode avoids that complexity without silently changing existing callers'
+guarantees. Performance claims must identify the mode; strict is the
+compatibility default.
+
+## Strict verification on every read
 
 1. Resolve canonical selected stores and validate the manifest identity against
    the requested global/project/session partition.
@@ -35,14 +134,15 @@ partial index. Windows replacement waits a bounded period for native readers and
 never unlinks a held generation or relaxes permissions. Recall does not modify
 source bytes or revision history; the OS may update access times.
 
-## Invalidation across processes and machines
+## Strict invalidation across processes and machines
 
-Every process repeats verification; there is no time-to-live or grace period.
-Creation, updates, tombstones, supersession, promotion, and session discard are
-visible to a query started after publication completes. Git checkout/fetch/merge
-imports and independent external file changes go through the same enumeration
-and content checks, without relying on Git metadata or calling Git during
-recall. Physical source removal cannot leave a successful cached search hit.
+Every strict process repeats verification; there is no time-to-live or grace
+period. Creation, updates, tombstones, supersession, promotion, and session
+discard are visible to a query started after publication completes. Git
+checkout/fetch/merge imports and independent external file changes go through
+the same enumeration and content checks, without relying on Git metadata or
+calling Git during recall. Physical source removal cannot leave a successful
+cached search hit.
 
 Index keys include canonical store locations and scope identities. A different
 project/session selection uses its own corpus and BM25 ranking. Index caches are

@@ -1,5 +1,20 @@
 # Phased implementation plan
 
+## Phase 8: incremental indexing and explicit fast recall
+
+Implementation and evidence: [index-freshness.md](index-freshness.md) and
+[phase-8-performance.md](phase-8-performance.md). Strict remains the
+compatibility default; explicit fast mode scans real paths and validates
+additions/results, reusing validated history. SQLite changes are transactional
+on private copies; source/config schemas and Git safety remain unchanged.
+
+Acceptance requires comparable 30-sample 10,000-memory measurements, explicit
+mode-specific latency claims, missing-tombstone/edit/concurrency/crash/Git
+regressions, package/install checks and observed Windows/macOS/Linux CI. Fast
+mode's unreturned-byte limitation must remain explicit. A fast-mode result does
+not close the default strict-mode performance blocker. Publication still needs
+owner authorization and resolution of the documented release gates.
+
 The first task establishes Phase 1 and specifies later behavior. A phase is done
 only when its acceptance checks pass; later phases must not be inferred from
 placeholder command names. Root `README.md` remains exclusively owner-maintained

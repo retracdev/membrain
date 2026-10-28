@@ -236,6 +236,35 @@ test('publication never overwrites existing bytes, even when called without a lo
   );
 });
 
+test('independent fast readers and writers converge through incremental generations', async (t) => {
+  const f = await fixture(t);
+  const baseline = await f.engine.remember(
+    { scope: 'global' },
+    { content: 'fast concurrency baseline' },
+  );
+  const results = await Promise.all([
+    ...Array.from({ length: 4 }, (_, i) => child(f, 'create', `fast-${i}`)),
+    ...Array.from({ length: 4 }, (_, i) => child(f, 'read-fast', String(i))),
+  ]);
+  for (const result of results)
+    assert.equal(result.status, 0, JSON.stringify(result));
+  for (const reader of results.slice(4))
+    assert.ok(
+      reader.data.results.some(
+        ({ record }) => record.id === baseline.record.id,
+      ),
+    );
+  const final = await f.engine.query(
+    { scope: 'global' },
+    { limit: 100, verification: 'fast' },
+  );
+  assert.equal(final.results.length, 5);
+  assert.deepEqual(
+    final.results,
+    (await f.engine.query({ scope: 'global' }, { limit: 100 })).results,
+  );
+});
+
 test('independent reader and writer processes converge without a stale warm generation', async (t) => {
   const f = await fixture(t);
   const baseline = await f.engine.remember(

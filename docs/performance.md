@@ -1,5 +1,10 @@
 # Recall performance and reproducible measurements
 
+Phase 8 results and explicit fast/strict measurements are recorded in
+[phase-8-performance.md](phase-8-performance.md). The Phase 6/7 text below is
+historical. Strict remains the default; only explicit fast verification avoids
+opening every historical revision on unchanged recall. Compare modes by name.
+
 The one-second warm-recall release gate remains open until measured evidence
 meets it. SQLite reuse alone is insufficient: every retrieval still reads,
 validates, and hashes authoritative JSONL history. No metadata-only shortcut,

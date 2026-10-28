@@ -1,9 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Config } from '../config.js';
 import { MembrainError } from '../errors.js';
-import { literalQuery, queryIndex } from '../index/search.js';
+import { literalQuery, queryIndex, queryStores } from '../index/search.js';
 import type { QueryOptions, QueryResult } from '../index/search.js';
-import { appendRevision, readStore, writeStore } from '../storage/store.js';
+import {
+  appendRevision,
+  readStore,
+  writeStore,
+  withRevision,
+  withRevisions,
+} from '../storage/store.js';
 import type { Snapshot } from '../storage/store.js';
 import { selectLocations } from './scopes.js';
 import type { Location, Selection } from './scopes.js';
@@ -141,8 +147,16 @@ export class MemoryEngine {
     options: QueryOptions,
   ): Promise<QueryResult> {
     if (options.query !== undefined) literalQuery(options.query);
-    const snapshots = await this.snapshots(selection);
     try {
+      if (options.verification === 'fast') {
+        return await queryStores(
+          await selectLocations(this.config, selection, this.cwd),
+          options,
+          this.protectedRoots(),
+          this.cacheRoot,
+        );
+      }
+      const snapshots = await this.snapshots(selection);
       return await queryIndex(
         snapshots,
         options,
@@ -163,12 +177,13 @@ export class MemoryEngine {
     replayed = false,
     deduplicated = false,
     publicationWarnings: Warning[] = [],
+    verifiedSnapshot?: Snapshot,
   ): Promise<Saved> {
     const warnings: Warning[] = [...publicationWarnings];
     try {
       const result = await queryIndex(
-        [await readStore(location)],
-        { limit: 1 },
+        [withRevision(verifiedSnapshot ?? (await readStore(location)), record)],
+        { limit: 1, verification: 'fast' },
         this.protectedRoots(),
         this.cacheRoot,
       );
@@ -216,7 +231,9 @@ export class MemoryEngine {
       sessionId: location.sessionId,
     });
     const warnings: Warning[] = [];
+    let verifiedSnapshot: Snapshot | undefined;
     const result = await writeStore(location, async (snapshot, assertOwned) => {
+      verifiedSnapshot = snapshot;
       if (operationId) {
         const previous = snapshot.records.find(
           (record) => record.operationId === operationId,
@@ -277,6 +294,7 @@ export class MemoryEngine {
       result.replayed,
       result.deduplicated,
       warnings,
+      verifiedSnapshot,
     );
   }
   async remember(selection: Selection, draft: Draft): Promise<Saved> {
@@ -353,7 +371,9 @@ export class MemoryEngine {
       uuid(change.expectedRevision, 'expectedRevision');
     const operationKind = deleting ? 'forget' : 'update';
     const warnings: Warning[] = [];
+    let verifiedSnapshot: Snapshot | undefined;
     const result = await writeStore(location, async (snapshot, assertOwned) => {
+      verifiedSnapshot = snapshot;
       const previous = head(snapshot, id);
       const patch = {
         ...(change.content === undefined
@@ -434,6 +454,7 @@ export class MemoryEngine {
       result.replayed,
       result.deduplicated,
       warnings,
+      verifiedSnapshot,
     );
   }
   async update(
@@ -471,7 +492,9 @@ export class MemoryEngine {
     if (!location) fail('SESSION_REQUIRED', 'Select a configured session.');
     const records: Revision[] = [];
     const publicationWarnings: Warning[] = [];
+    let verifiedSnapshot: Snapshot | undefined;
     await writeStore(location, async (snapshot, assertOwned) => {
+      verifiedSnapshot = snapshot;
       if (snapshot.entries.some((entry) => entry.conflict))
         fail(
           'REVISION_CONFLICT',
@@ -493,6 +516,8 @@ export class MemoryEngine {
         records.push(record);
       }
     });
+    if (records.length)
+      verifiedSnapshot = withRevisions(verifiedSnapshot!, records);
     const warnings = records.length
       ? (
           await this.afterSave(
@@ -501,6 +526,7 @@ export class MemoryEngine {
             false,
             false,
             publicationWarnings,
+            verifiedSnapshot,
           )
         ).warnings
       : [];

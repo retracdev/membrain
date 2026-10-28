@@ -13,8 +13,14 @@ const engine = new MemoryEngine(
 );
 try {
   const saved =
-    mode === 'read'
-      ? await engine.query({ scope: 'global' }, { limit: 100 })
+    mode === 'read' || mode === 'read-fast'
+      ? await engine.query(
+          { scope: 'global' },
+          {
+            limit: 100,
+            ...(mode === 'read-fast' ? { verification: 'fast' } : {}),
+          },
+        )
       : mode === 'update'
         ? await engine.update({ scope: 'global' }, id, {
             content: `updated by ${label}`,

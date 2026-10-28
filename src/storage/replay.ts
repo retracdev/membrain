@@ -65,6 +65,7 @@ async function run(job: ReplayJob): Promise<ReplayChunk> {
 export async function replayDirectories(
   location: Location,
   directories: string[],
+  known?: Map<string, string[]>,
 ): Promise<ReplayChunk | undefined> {
   const timing = channel('membrain.performance');
   const chunks: string[][] = Array.from(
@@ -78,7 +79,12 @@ export async function replayDirectories(
   // store lock or letting a fixture clean up source directories.
   const results = await Promise.allSettled(
     chunks.map((chunk) =>
-      run({ location, directories: chunk, profile: timing.hasSubscribers }),
+      run({
+        location,
+        directories: chunk,
+        profile: timing.hasSubscribers,
+        ...(known ? { known: chunk.flatMap((id) => known.get(id) ?? []) } : {}),
+      }),
     ),
   );
   for (const result of results)
@@ -95,10 +101,12 @@ export async function replayDirectories(
     return undefined;
   }
   const loaded: ReplayChunk['loaded'] = [];
+  const reused: string[] = [];
   const warnings: ReplayChunk['warnings'] = [];
   for (const result of results) {
     if (result.status === 'rejected') throw result.reason;
     for (const item of result.value.loaded) loaded.push(item);
+    reused.push(...result.value.reused);
     for (const warning of result.value.warnings) warnings.push(warning);
     for (const metric of result.value.metrics) timing.publish(metric);
   }
@@ -113,5 +121,5 @@ export async function replayDirectories(
             ? 1
             : 0,
   );
-  return { loaded, warnings, metrics: [] };
+  return { loaded, reused, warnings, metrics: [] };
 }

@@ -84,7 +84,12 @@ test('unchanged retrieval needs no filesystem write permission or index lock', a
   const lock = path.join(path.dirname(f.index), '.membrain-lock');
   await mkdir(lock); // Existing readers do not wait for maintenance locks.
   const before = await tree(f.directory);
-  for (const mode of [[], ['--read-only']]) {
+  for (const mode of [
+    [],
+    ['--read-only'],
+    ['--verification', 'fast'],
+    ['--verification', 'fast', '--read-only'],
+  ]) {
     const result = spawnSync(
       process.execPath,
       [
@@ -267,6 +272,11 @@ test(
       await chmod(f.cache, 0o500);
       assert.equal((await f.query()).index.rebuilt, false);
       assert.equal((await f.query({ readOnly: true })).results.length, 1);
+      assert.equal(
+        (await f.query({ readOnly: true, verification: 'fast' })).results
+          .length,
+        1,
+      );
       await assert.rejects(f.query({ rebuild: true }), {
         code: 'INDEX_UNAVAILABLE',
       });
@@ -319,6 +329,11 @@ test(
       acl('/deny', `*${sid}:(WD,AD)`);
       assert.equal((await f.query()).index.rebuilt, false);
       assert.equal((await f.query({ readOnly: true })).results.length, 1);
+      assert.equal(
+        (await f.query({ readOnly: true, verification: 'fast' })).results
+          .length,
+        1,
+      );
       await assert.rejects(f.query({ rebuild: true }), {
         code: 'INDEX_UNAVAILABLE',
       });

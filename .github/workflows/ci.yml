@@ -39,6 +39,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        verification: [global, fast]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -50,9 +51,11 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm run benchmark:suite -- ci 100,1000,10000 30
+      - run:
+          npm run benchmark:suite -- ci 100,1000,10000 30 ${{
+          matrix.verification }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: performance-${{ matrix.os }}
+          name: performance-${{ matrix.os }}-${{ matrix.verification }}
           path: coverage/performance/

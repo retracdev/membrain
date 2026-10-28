@@ -29,6 +29,7 @@ interface Options extends Selection {
   rebuildIndex?: boolean;
   readOnly?: boolean;
   literal?: boolean;
+  verification?: 'strict' | 'fast';
   promote?: string;
   to?: string;
 }
@@ -427,6 +428,12 @@ export function registerMemoryCommands(program: Command): void {
         ],
       )
       .option(
+        '--verification <mode>',
+        'strict (default): hash all history; fast: scan paths and verify returned revisions (see docs/index-freshness.md)',
+        (value: string) =>
+          choice(value, ['strict', 'fast'] as const, 'verification'),
+      )
+      .option(
         '--read-only',
         'reuse a current index without cache writes; fail if maintenance is needed',
       )
@@ -484,6 +491,9 @@ export function registerMemoryCommands(program: Command): void {
           ? {}
           : { readOnly: options.readOnly }),
         ...(options.literal === undefined ? {} : { literal: options.literal }),
+        ...(options.verification === undefined
+          ? {}
+          : { verification: options.verification }),
       });
       output(
         name === 'recall'

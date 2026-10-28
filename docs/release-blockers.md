@@ -1,5 +1,13 @@
 # Release blockers and performance targets
 
+Phase 8 adds explicit fast verification and incremental index maintenance while
+retaining strict as the default. See
+[phase-8-performance.md](phase-8-performance.md) for mode-specific measurements
+and observed checks. Fast-mode latency alone cannot close the default strict
+recall gate; arbitrary in-place edit detection still requires strict
+verification. Registry ownership/publication authorization remain separate
+gates. No release is authorized by this work.
+
 Phase 7 profiling, verified replay workers, benchmark results and remaining
 limits are recorded in [phase-7-performance.md](phase-7-performance.md). Full
 source verification remains; performance and registry ownership must both be
