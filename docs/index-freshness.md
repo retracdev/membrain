@@ -188,7 +188,7 @@ Full verification therefore remains proportional to source file/history count.
 See [performance.md](performance.md) and the Phase 7 measurements for the cost;
 the one-second release gate cannot be closed using an SQL-only measurement.
 
-## Temporary replay workers
+## Strict replay workers
 
 Stores with at least 1,000 memory directories use synchronous, checked
 filesystem reads in temporary Node worker threads. A process-wide limit of eight
