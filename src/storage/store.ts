@@ -3,6 +3,7 @@ import { lstat, readFile, readdir } from 'node:fs/promises';
 import { readFile as readFileCallback } from 'node:fs';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { span } from '../profile.js';
 import {
   fail,
   isObject,
@@ -19,6 +20,14 @@ import {
   safeDirectory,
   withLock,
 } from './files.js';
+import {
+  decodeRevision,
+  invalidRevision,
+  sourceFile,
+  temporary,
+} from './revision.js';
+import type { LoadedRevision, SourceFile } from './revision.js';
+import { replayDirectories } from './replay.js';
 
 // One promise around callback readFile avoids FileHandle promise bookkeeping
 // for every open/stat/read/close of a small immutable revision. Concurrency and
@@ -44,6 +53,7 @@ export interface ReplayTiming {
   enumerationMs: number;
   readValidateHashMs: number;
   projectionMs: number;
+  strategy?: 'async' | 'workers';
 }
 function matches(
   value: { scope: string; projectId?: string; sessionId?: string },
@@ -128,6 +138,7 @@ export async function readStore(
   timing?: ReplayTiming,
 ): Promise<Snapshot> {
   const started = performance.now();
+  const finishEnumeration = span('store.enumeration');
   const manifest = await readManifest(location);
   const warnings: Warning[] = [];
   if (!manifest)
@@ -146,80 +157,69 @@ export async function readStore(
       'CORRUPT_STORE',
       `Missing or unsafe records directory at ${directory}.`,
     );
-  const files: { file: string; id: string; revisionId: string }[] = [];
-  function temporary(file: string): boolean {
-    if (!file.endsWith('.membrain-tmp')) return false;
-    warnings.push({
-      code: 'UNPUBLISHED_FILE',
-      message: `Unpublished temporary file: ${file}. Inspect it before any manual cleanup.`,
-    });
-    return true;
-  }
   for (const rootEntry of await readdir(location.path))
-    temporary(path.join(location.path, rootEntry));
-  await mapLimit(
-    await readdir(directory, { withFileTypes: true }),
-    async (entry) => {
-      const subdirectory = path.join(directory, entry.name);
-      if (temporary(subdirectory)) return;
-      if (!entry.isDirectory() || entry.isSymbolicLink())
-        fail('CORRUPT_STORE', `Unexpected source path at ${subdirectory}.`);
-      try {
-        uuid(entry.name);
-      } catch {
-        fail('CORRUPT_STORE', `Invalid memory directory at ${subdirectory}.`);
-      }
-      for (const file of await readdir(subdirectory, { withFileTypes: true })) {
-        const filename = path.join(subdirectory, file.name);
-        if (temporary(filename)) continue;
-        if (
-          !file.isFile() ||
-          file.isSymbolicLink() ||
-          !file.name.endsWith('.jsonl')
-        )
-          fail('CORRUPT_STORE', `Unexpected source file at ${filename}.`);
-        const revisionId = file.name.slice(0, -6);
-        try {
-          uuid(revisionId);
-        } catch {
-          fail('CORRUPT_STORE', `Invalid revision filename at ${filename}.`);
-        }
-        files.push({ file: filename, id: entry.name, revisionId });
-      }
-    },
-  );
-  files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
-  const enumerated = performance.now();
-  const loaded = await mapLimit(files, async ({ file, id, revisionId }) => {
+    temporary(path.join(location.path, rootEntry), warnings);
+  const directories = (
+    await readdir(directory, { withFileTypes: true })
+  ).filter((entry) => {
+    const subdirectory = path.join(directory, entry.name);
+    if (temporary(subdirectory, warnings)) return false;
+    if (!entry.isDirectory() || entry.isSymbolicLink())
+      fail('CORRUPT_STORE', `Unexpected source path at ${subdirectory}.`);
     try {
-      await regularFile(file);
-      const bytes = await readRevisionBytes(file);
-      if (bytes.length > 262_144) throw new Error('Oversized source');
-      const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-      const normalized = content.endsWith('\r\n')
-        ? `${content.slice(0, -2)}\n`
-        : content;
-      if (!content.endsWith('\n') || content.slice(0, -1).includes('\n'))
-        throw new Error('Incomplete JSONL');
-      const record = validateRevision(JSON.parse(content) as unknown);
-      if (
-        record.id !== id ||
-        record.revisionId !== revisionId ||
-        !matches(record, location)
-      )
-        throw new Error('Identity mismatch');
-      return {
-        record,
-        hash: createHash('sha256').update(normalized).digest('hex'),
-      };
+      uuid(entry.name);
     } catch {
-      fail(
-        'CORRUPT_STORE',
-        `Invalid source revision at ${file}:1. Preserve it; no automatic repair was attempted.`,
-      );
+      fail('CORRUPT_STORE', `Invalid memory directory at ${subdirectory}.`);
     }
+    return true;
   });
+  async function enumerate(): Promise<SourceFile[]> {
+    const files: SourceFile[] = [];
+    await mapLimit(directories, async (entry) => {
+      const subdirectory = path.join(directory, entry.name);
+      for (const file of await readdir(subdirectory, { withFileTypes: true })) {
+        const source = sourceFile(file, subdirectory, entry.name, warnings);
+        if (source) files.push(source);
+      }
+    });
+    return files.sort((a, b) =>
+      a.file < b.file ? -1 : a.file > b.file ? 1 : 0,
+    );
+  }
+  const threaded = directories.length >= 1000;
+  const files = threaded ? [] : await enumerate();
+  const enumerated = performance.now();
+  finishEnumeration();
+  const finishRead = span('store.readValidateHash');
+  let loaded: LoadedRevision[];
+  const chunk = threaded
+    ? await replayDirectories(
+        location,
+        directories.map((entry) => entry.name),
+      )
+    : undefined;
+  if (chunk) {
+    loaded = chunk.loaded;
+    warnings.push(...chunk.warnings);
+  } else
+    loaded = await mapLimit(
+      threaded ? await enumerate() : files,
+      async (source) => {
+        try {
+          await regularFile(source.file);
+          return decodeRevision(
+            await readRevisionBytes(source.file),
+            source,
+            location,
+          );
+        } catch {
+          invalidRevision(source.file);
+        }
+      },
+    );
   const validated = performance.now();
+  finishRead();
+  const finishProjection = span('store.projection');
   const records = loaded.map((entry) => entry.record);
   const fingerprint = createHash('sha256')
     .update(JSON.stringify(manifest))
@@ -230,10 +230,12 @@ export async function readStore(
     )
     .digest('hex');
   const entries = projectHeads(records);
+  finishProjection();
   if (timing) {
     timing.enumerationMs = enumerated - started;
     timing.readValidateHashMs = validated - enumerated;
     timing.projectionMs = performance.now() - validated;
+    timing.strategy = chunk ? 'workers' : 'async';
   }
   return {
     location,

@@ -5,6 +5,12 @@ meets it. SQLite reuse alone is insufficient: every retrieval still reads,
 validates, and hashes authoritative JSONL history. No metadata-only shortcut,
 stale-cache fallback, background process, or storage-format change was added.
 
+Phase 7 adds bounded temporary replay workers and opt-in local diagnostics. See
+[phase-7-performance.md](phase-7-performance.md) for the new measurements,
+tradeoffs, and gate assessment, and [index-freshness.md](index-freshness.md) for
+the unchanged content-verification contract. The Phase 6 observations below are
+historical and must not be treated as a controlled before/after comparison.
+
 ## Methodology
 
 ```sh

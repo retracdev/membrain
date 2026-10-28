@@ -8,6 +8,7 @@ import type { Selection } from './engine/scopes.js';
 import { choice, fail, metadata, states } from './engine/model.js';
 import type { Json } from './engine/model.js';
 import type { QueryResult } from './index/search.js';
+import { span } from './profile.js';
 
 interface Options extends Selection {
   stdin?: boolean;
@@ -146,6 +147,7 @@ function draftFields(options: Options): Omit<Draft, 'content'> {
 }
 
 export function recallResult(data: QueryResult, budget: number): object {
+  const finish = span('cli.recallBudget');
   const results: object[] = [];
   let truncated = false;
   for (const hit of data.results) {
@@ -189,6 +191,7 @@ export function recallResult(data: QueryResult, budget: number): object {
     });
     truncated ||= shortened;
   }
+  finish();
   return {
     untrusted: true,
     results,
@@ -203,12 +206,15 @@ export function recallResult(data: QueryResult, budget: number): object {
 export function registerMemoryCommands(program: Command): void {
   let configuration: Config;
   async function engine(): Promise<MemoryEngine> {
+    const finish = span('cli.configuration');
     configuration = (
       await loadConfig(program.opts<{ config?: string }>().config)
     ).config;
+    finish();
     return new MemoryEngine(configuration);
   }
   function output(data: unknown): void {
+    const finish = span('cli.serialization');
     console.log(
       JSON.stringify(
         data,
@@ -216,6 +222,7 @@ export function registerMemoryCommands(program: Command): void {
         program.opts<{ json?: boolean }>().json ? undefined : 2,
       ),
     );
+    finish();
   }
   const remember = fields(
     selection(

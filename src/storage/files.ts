@@ -14,6 +14,7 @@ import { hostname } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from '../engine/model.js';
+import { span } from '../profile.js';
 
 export function errno(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException)?.code;
@@ -103,6 +104,7 @@ export async function withLock<T>(
   const owner = path.join(lock, 'owner.json');
   const token = randomUUID();
   const start = Date.now();
+  const finishAcquisition = span('lock.acquire');
   while (true) {
     try {
       await mkdir(lock, { mode: 0o700 });
@@ -126,6 +128,7 @@ export async function withLock<T>(
       startedAt: new Date().toISOString(),
     }),
   );
+  finishAcquisition();
   async function assertOwned(): Promise<void> {
     try {
       if (
@@ -149,9 +152,11 @@ export async function withLock<T>(
   try {
     return await action(assertOwned);
   } finally {
+    const finishRelease = span('lock.release');
     clearInterval(heartbeat);
     await assertOwned();
     await unlink(owner);
     await rmdir(lock);
+    finishRelease();
   }
 }

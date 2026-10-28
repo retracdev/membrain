@@ -1,5 +1,10 @@
 # Release blockers and performance targets
 
+Phase 7 profiling, verified replay workers, benchmark results and remaining
+limits are recorded in [phase-7-performance.md](phase-7-performance.md). Full
+source verification remains; performance and registry ownership must both be
+resolved before publication. The Phase 6 figures below remain historical.
+
 ## Phase 6 status: publication blocked
 
 Current evidence and the 30-process large/small recall measurements are in

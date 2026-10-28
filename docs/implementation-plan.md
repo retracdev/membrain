@@ -225,3 +225,37 @@ Acceptance:
 - Owner reviews recommended README links separately. Publishing, pushing, and PR
   creation still require explicit instructions; phase completion is not
   authorization for those actions.
+
+## Phase 7: memory engine performance
+
+Investigate full recall latency and optimize measured source replay costs while
+preserving the version-1 JSONL authority, disposable SQLite index, lexical
+ranking, synchronization boundaries, and offline operation. A complete Phase 7
+requires the 10,000-memory warm CLI p95 <=1 second gate; an optimization or a
+passing correctness suite alone does not complete that gate.
+
+Implemented work adds opt-in local profiling, reproducible global/mixed-scope
+benchmarks and temporary, bounded source replay workers. Full content hashing
+and ancestry validation remain mandatory; no metadata-only freshness policy or
+source migration is introduced. See [index-freshness.md](index-freshness.md) and
+[phase-7-performance.md](phase-7-performance.md) for measurements and
+limitations.
+
+Acceptance:
+
+- Measure cold/warm retrieval, startup, replay, index checks/rebuild, FTS/BM25,
+  serialization, filesystem work, and memory using disposable datasets.
+- Report sample counts and p50/p95/p99, including 100, 1,000 and 10,000
+  memories; attempt 50,000 when practical. Distinguish diagnostics from
+  uninstrumented end-to-end CLI timings and do not claim causal gains from
+  desktop variation.
+- Preserve external-change detection, timestamp-restored edit refusal, source
+  removal/tombstones, cross-process consistency, scope isolation, corruption
+  recovery, Git safety, and deterministic rebuilds. Bound temporary workers
+  across concurrent stores and retain complete replay when workers are denied.
+- Run the full check, package/install checks and existing lexical regressions;
+  observe the Windows/macOS/Linux CI matrix. Keep strict timing assertions in
+  dedicated benchmarks, outside ordinary functional tests.
+- If latency misses the gate, retain the release blocker and document the
+  remaining measured bottleneck and next justified design work. No publishing,
+  release, source migration, daemon, model/service or integration installation.

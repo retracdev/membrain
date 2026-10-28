@@ -291,8 +291,18 @@ test('two working copies merge independent revisions without duplication and pro
       { content: 'Writer B independent preferences' },
     )
   ).record;
+  const recall = (engine) =>
+    engine.query({ scope: 'global' }, { query: 'SQLite', limit: 10 });
+  const beforeImport = await recall(engineB);
+  assert.equal(beforeImport.index.rebuilt, false);
+  assert.ok(
+    beforeImport.results.some(({ record }) => record.id === f.record.id),
+  );
   success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
   success(await synchronizeMemories(configB, { scope: 'global' }, f.b));
+  const imported = await recall(engineB);
+  assert.equal(imported.index.rebuilt, true);
+  assert.equal((await recall(engineB)).index.rebuilt, false);
   success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
   assert.equal(
     (await readStore({ scope: 'global', path: f.configA.global.path })).records
@@ -302,6 +312,13 @@ test('two working copies merge independent revisions without duplication and pro
   await f.engineA.forget({ scope: 'global' }, f.record.id);
   success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
   success(await synchronizeMemories(configB, { scope: 'global' }, f.b));
+  const afterDeletion = await recall(engineB);
+  assert.equal(afterDeletion.index.rebuilt, true);
+  assert.equal(
+    afterDeletion.results.some(({ record }) => record.id === f.record.id),
+    false,
+  );
+  assert.equal((await recall(engineB)).index.rebuilt, false);
   const snapshot = await readStore({
     scope: 'global',
     path: configB.global.path,

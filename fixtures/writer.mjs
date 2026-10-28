@@ -13,22 +13,24 @@ const engine = new MemoryEngine(
 );
 try {
   const saved =
-    mode === 'update'
-      ? await engine.update({ scope: 'global' }, id, {
-          content: `updated by ${label}`,
-          expectedRevision: expected,
-        })
-      : await engine.remember(
-          { scope: 'global' },
-          {
-            content:
-              mode === 'retry'
-                ? 'one shared retry'
-                : `concurrent unique memory ${label}`,
-            operationId:
-              mode === 'retry' ? 'shared-operation' : `writer-${label}`,
-          },
-        );
+    mode === 'read'
+      ? await engine.query({ scope: 'global' }, { limit: 100 })
+      : mode === 'update'
+        ? await engine.update({ scope: 'global' }, id, {
+            content: `updated by ${label}`,
+            expectedRevision: expected,
+          })
+        : await engine.remember(
+            { scope: 'global' },
+            {
+              content:
+                mode === 'retry'
+                  ? 'one shared retry'
+                  : `concurrent unique memory ${label}`,
+              operationId:
+                mode === 'retry' ? 'shared-operation' : `writer-${label}`,
+            },
+          );
   process.stdout.write(JSON.stringify(saved));
 } catch (error) {
   process.stdout.write(

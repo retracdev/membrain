@@ -226,6 +226,12 @@ preserved, even if an older index exists. A cached hash can detect a changed
 immutable revision, but caches are disposable and hashes are not cryptographic
 signatures against a malicious local file editor.
 
+Stores with at least 1,000 memory directories use temporary replay workers;
+smaller stores use bounded asynchronous reads. Both paths fully verify the same
+source bytes. Worker unavailability falls back to full ordinary replay. See
+[index-freshness.md](index-freshness.md) for the consistency contract,
+process-wide worker bound, and permission-safe fallback.
+
 FTS5 uses `unicode61`, default diacritic folding, and no stemming. Queries are
 NFC-normalized, lowercased, split into Unicode letter/number/mark tokens,
 deduped, quoted literally, and OR-combined. English function words are removed

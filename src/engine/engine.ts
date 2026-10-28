@@ -19,6 +19,7 @@ import {
   validateRevision,
 } from './model.js';
 import type { Json, Revision, Warning } from './model.js';
+import { span } from '../profile.js';
 
 export interface Draft {
   content: string;
@@ -107,10 +108,15 @@ export class MemoryEngine {
     ];
   }
   private async snapshots(selection: Selection): Promise<Snapshot[]> {
+    const finishSelection = span('engine.scopeResolution');
     const locations = await selectLocations(this.config, selection, this.cwd);
+    finishSelection();
+    const finishSources = span('engine.sourceReplay');
     const snapshots = await Promise.all(
       locations.map((item) => readStore(item)),
     );
+    finishSources();
+    const finishIdentity = span('engine.crossScopeIdentity');
     const ids = new Map<string, string>();
     const revisions = new Set<string>();
     for (const snapshot of snapshots)
@@ -127,6 +133,7 @@ export class MemoryEngine {
         ids.set(record.id, snapshot.location.path);
         revisions.add(record.revisionId);
       }
+    finishIdentity();
     return snapshots;
   }
   async query(

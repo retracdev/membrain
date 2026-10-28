@@ -15,6 +15,7 @@ import type { Snapshot } from '../storage/store.js';
 import { fail } from '../engine/model.js';
 import type { Revision, State, Warning } from '../engine/model.js';
 import { MembrainError } from '../errors.js';
+import { span } from '../profile.js';
 
 export interface QueryOptions {
   query?: string;
@@ -133,6 +134,7 @@ export async function queryIndex(
   protectedRoots: string[],
   cacheRoot = defaultCacheRoot(),
 ): Promise<QueryResult> {
+  const finishIndex = span('index.total');
   const query =
     options.query === undefined
       ? undefined
@@ -203,6 +205,7 @@ export async function queryIndex(
           `Index path is not a regular file at ${file}.`,
         );
       if (!stat) return undefined;
+      const finishOpen = span('index.open');
       db = new Database(file, {
         readonly: true,
         fileMustExist: true,
@@ -211,10 +214,14 @@ export async function queryIndex(
       db.exec(
         'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;',
       );
+      finishOpen();
+      const finishIntegrity = span('index.integrity');
       // SQLite >=3.44 checks FTS5 through xIntegrity as part of this read-only
       // pragma. It replaces the old quick_check + write-classified FTS INSERT.
       if (db.pragma('integrity_check', { simple: true }) !== 'ok')
         throw new Error('integrity check');
+      finishIntegrity();
+      const finishFreshness = span('index.freshness');
       const settings = new Map(
         db
           .prepare<[], { key: string; value: string }>(
@@ -223,31 +230,39 @@ export async function queryIndex(
           .all()
           .map((item) => [item.key, item.value]),
       );
-      const oldHashes = new Map(
-        db
-          .prepare<[], { key: string; hash: string }>(
-            'SELECT key,hash FROM hashes',
-          )
-          .all()
-          .map((item) => [item.key, item.hash]),
-      );
-      for (const snapshot of snapshots)
-        for (const item of snapshot.hashes) {
-          const old = oldHashes.get(
-            `${snapshot.location.path}:${item.revisionId}`,
-          );
-          if (old && old !== item.hash)
-            fail(
-              'CORRUPT_STORE',
-              'An immutable source revision changed since it was indexed. Restore the original or inspect its provenance; do not edit revision files in place.',
+      const current =
+        settings.get('version') === schemaVersion &&
+        settings.get('fingerprint') === fingerprint;
+      // This freshly computed fingerprint covers every source hash and manifest.
+      // Only changed sources need the per-revision comparison, which rejects
+      // edits to immutable IDs before considering a replacement generation.
+      if (current) {
+        // Retain structural recovery without materializing every hash row.
+        db.prepare('SELECT key,hash FROM hashes LIMIT 0').all();
+      } else {
+        const oldHashes = new Map(
+          db
+            .prepare<[], { key: string; hash: string }>(
+              'SELECT key,hash FROM hashes',
+            )
+            .all()
+            .map((item) => [item.key, item.hash]),
+        );
+        for (const snapshot of snapshots)
+          for (const item of snapshot.hashes) {
+            const old = oldHashes.get(
+              `${snapshot.location.path}:${item.revisionId}`,
             );
-        }
-      if (
-        (!rebuilt && options.rebuild) ||
-        settings.get('version') !== schemaVersion ||
-        settings.get('fingerprint') !== fingerprint
-      )
-        return undefined;
+            if (old && old !== item.hash)
+              fail(
+                'CORRUPT_STORE',
+                'An immutable source revision changed since it was indexed. Restore the original or inspect its provenance; do not edit revision files in place.',
+              );
+          }
+      }
+      finishFreshness();
+      if ((!rebuilt && options.rebuild) || !current) return undefined;
+      const finishQuery = span('index.ftsBm25');
       const clauses: string[] = [];
       const bindings: (string | number)[] = [];
       if (query !== undefined) {
@@ -277,6 +292,7 @@ export async function queryIndex(
           { revisionId: string; head: number; conflict: number; score?: number }
         >(sql)
         .all(...bindings);
+      finishQuery();
       const results = rows.map((row) => {
         const record = source.get(row.revisionId);
         if (!record)
@@ -323,7 +339,9 @@ export async function queryIndex(
       try {
         generation = new Database(temporary);
         await chmod(temporary, 0o600);
+        const finishBuild = span('index.build');
         populate(generation, snapshotsSorted, fingerprint);
+        finishBuild();
         if (generation.pragma('integrity_check', { simple: true }) !== 'ok')
           fail('INDEX_FAILED', 'New index generation failed validation.');
         generation
@@ -374,5 +392,7 @@ export async function queryIndex(
       'INDEX_UNAVAILABLE',
       `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
     );
+  } finally {
+    finishIndex();
   }
 }

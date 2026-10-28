@@ -236,6 +236,38 @@ test('publication never overwrites existing bytes, even when called without a lo
   );
 });
 
+test('independent reader and writer processes converge without a stale warm generation', async (t) => {
+  const f = await fixture(t);
+  const baseline = await f.engine.remember(
+    { scope: 'global' },
+    { content: 'reader baseline' },
+  );
+  const results = await Promise.all([
+    ...Array.from({ length: 4 }, (_, i) => child(f, 'create', `mixed-${i}`)),
+    ...Array.from({ length: 4 }, (_, i) => child(f, 'read', String(i))),
+  ]);
+  for (const result of results)
+    assert.equal(result.status, 0, JSON.stringify(result));
+  for (const reader of results.slice(4)) {
+    assert.ok(
+      reader.data.results.some(
+        ({ record }) => record.id === baseline.record.id,
+      ),
+    );
+    assert.equal(
+      new Set(reader.data.results.map(({ record }) => record.id)).size,
+      reader.data.results.length,
+    );
+  }
+  const final = await child(f, 'read', 'final');
+  assert.equal(final.status, 0, JSON.stringify(final));
+  assert.equal(final.data.results.length, 5);
+  const warm = await child(f, 'read', 'warm');
+  assert.equal(warm.status, 0, JSON.stringify(warm));
+  assert.equal(warm.data.index.rebuilt, false);
+  assert.deepEqual(warm.data.results, final.data.results);
+});
+
 test('an error for an already complete publication reports the saved identity for review', async (t) => {
   const f = await fixture(t);
   const saved = await f.engine.remember(
