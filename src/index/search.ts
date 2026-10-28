@@ -104,42 +104,56 @@ export function defaultCacheRoot(): string {
 }
 const schemaVersion = '2';
 
+function indexUnavailable(directory: string): never {
+  fail(
+    'INDEX_UNAVAILABLE',
+    `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
+  );
+}
+
 async function indexPath(
   locations: Location[],
   protectedRoots: string[],
   cacheRoot: string,
 ): Promise<string> {
-  cacheRoot = await canonical(cacheRoot);
-  for (const root of protectedRoots) {
-    const source = await canonical(root);
-    if (contains(source, cacheRoot) || contains(cacheRoot, source))
-      fail(
-        'UNSAFE_CACHE_PATH',
-        'Cache and memory storage directories must not overlap. Set MEMBRAIN_CACHE_DIR to a separate local directory.',
-      );
+  try {
+    cacheRoot = await canonical(cacheRoot);
+    for (const root of protectedRoots) {
+      const source = await canonical(root);
+      if (contains(source, cacheRoot) || contains(cacheRoot, source))
+        fail(
+          'UNSAFE_CACHE_PATH',
+          'Cache and memory storage directories must not overlap. Set MEMBRAIN_CACHE_DIR to a separate local directory.',
+        );
+    }
+    const key = createHash('sha256')
+      .update(
+        JSON.stringify(
+          [...locations].sort((a, b) => (a.path < b.path ? -1 : 1)),
+        ),
+      )
+      .digest('hex');
+    const directory = path.join(cacheRoot, key);
+    for (const [file, directoryExpected] of [
+      [directory, true],
+      [path.join(directory, 'index.sqlite'), false],
+    ] as const) {
+      const stat = await lstat(file).catch((error: unknown) => {
+        if (errno(error) === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (
+        stat &&
+        (stat.isSymbolicLink() ||
+          (directoryExpected ? !stat.isDirectory() : !stat.isFile()))
+      )
+        fail('UNSAFE_CACHE_PATH', `Unsafe index path at ${file}.`);
+    }
+    return path.join(directory, 'index.sqlite');
+  } catch (error) {
+    if (error instanceof MembrainError) throw error;
+    indexUnavailable(cacheRoot);
   }
-  const key = createHash('sha256')
-    .update(
-      JSON.stringify([...locations].sort((a, b) => (a.path < b.path ? -1 : 1))),
-    )
-    .digest('hex');
-  const directory = path.join(cacheRoot, key);
-  for (const [file, directoryExpected] of [
-    [directory, true],
-    [path.join(directory, 'index.sqlite'), false],
-  ] as const) {
-    const stat = await lstat(file).catch((error: unknown) => {
-      if (errno(error) === 'ENOENT') return undefined;
-      throw error;
-    });
-    if (
-      stat &&
-      (stat.isSymbolicLink() ||
-        (directoryExpected ? !stat.isDirectory() : !stat.isFile()))
-    )
-      fail('UNSAFE_CACHE_PATH', `Unsafe index path at ${file}.`);
-  }
-  return path.join(directory, 'index.sqlite');
 }
 
 function checkpoint(snapshots: Snapshot[]): string {
@@ -870,10 +884,7 @@ export async function queryIndex(
     });
   } catch (error) {
     if (error instanceof MembrainError) throw error;
-    fail(
-      'INDEX_UNAVAILABLE',
-      `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
-    );
+    indexUnavailable(directory);
   } finally {
     finishIndex();
   }

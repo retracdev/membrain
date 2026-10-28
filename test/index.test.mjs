@@ -244,15 +244,19 @@ test('unavailable index directories report an actionable error and preserve dura
   const blocker = path.join(f.directory, 'not-a-directory');
   await writeFile(blocker, 'preserve');
   const engine = new MemoryEngine(f.config, f.directory, blocker);
-  await assert.rejects(
-    engine.query({ scope: 'global' }, { query: 'SQLite', limit: 5 }),
-    (error) => {
-      assert.equal(error.code, 'INDEX_UNAVAILABLE');
-      assert.match(error.message, /MEMBRAIN_CACHE_DIR/u);
-      assert.match(error.message, /permissions/u);
-      return true;
-    },
-  );
+  for (const verification of ['strict', 'fast'])
+    await assert.rejects(
+      engine.query(
+        { scope: 'global' },
+        { query: 'SQLite', limit: 5, verification },
+      ),
+      (error) => {
+        assert.equal(error.code, 'INDEX_UNAVAILABLE');
+        assert.match(error.message, /MEMBRAIN_CACHE_DIR/u);
+        assert.match(error.message, /permissions/u);
+        return true;
+      },
+    );
   assert.equal(await readFile(blocker, 'utf8'), 'preserve');
   assert.equal(
     JSON.parse(await readFile(f.source, 'utf8')).revisionId,
