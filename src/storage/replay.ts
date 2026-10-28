@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { channel } from 'node:diagnostics_channel';
+import { availableParallelism } from 'node:os';
 import type { Location } from '../engine/scopes.js';
 import { MembrainError } from '../errors.js';
 import type { ReplayChunk, ReplayJob, ReplayReply } from './replay-worker.js';
@@ -69,8 +70,9 @@ export async function replayDirectories(
   inventory = false,
 ): Promise<ReplayChunk | undefined> {
   const timing = channel('membrain.performance');
+  const parallelism = inventory ? Math.min(4, availableParallelism()) : limit;
   const chunks: string[][] = Array.from(
-    { length: Math.min(limit, directories.length) },
+    { length: Math.min(parallelism, directories.length) },
     () => [],
   );
   directories.forEach((directory, i) =>

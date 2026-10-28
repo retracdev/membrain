@@ -45,8 +45,9 @@ integrity audit.
    or size is freshness evidence: restored directory times cannot hide new
    updates/tombstones. Work remains proportional to directories/revision names,
    but historical files need no open/read/hash. Large stores use the existing
-   bounded temporary workers, with ordinary bounded traversal if workers are
-   unavailable.
+   bounded temporary workers (at most four and available CPU parallelism for
+   inventory; full replay retains its eight-worker ceiling), with ordinary
+   bounded traversal if workers are unavailable.
 4. Compare actual revision-path hashes/counts with the certified checkpoint. An
    unchanged inventory queries FTS without loading history rows or rebuilding
    the graph. A changed inventory loads the checkpoint, checks hash-inventory
