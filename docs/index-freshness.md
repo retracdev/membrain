@@ -15,7 +15,7 @@ membrain recall "SQLite decisions" --verification strict
 The option also applies to `search` and `list`. JSON `index.verification`
 records the effective mode. `--rebuild-index` always verifies all source bytes,
 even in fast mode. Configuration and JSONL remain schema 1; disposable SQLite is
-schema 2.
+schema 3, with a version-1 local generation certificate.
 
 Strict preserves every-read byte verification. Fast is an explicit choice for
 immutable revision workflows: it detects actual new/removed paths each
@@ -31,11 +31,15 @@ integrity audit.
 1. Resolve canonical selected stores and validate manifests. Checkpoints bind
    scope/path/store identity to hostname/platform and root device/inode/birth
    time. Changed bindings/manifests force full verification; caches are local.
-2. Read a compatible checkpoint in a SQLite read transaction, check database/FTS
-   integrity, aggregate hash-inventory completeness and a digest of cached
-   record JSON. Missing, damaged or incompatible checkpoints require full
-   replay. Store validated revision JSON, hashes and manifest identities in the
-   disposable database.
+2. Read SQLite as one bounded image and verify its complete SHA-256 against
+   `index.sqlite.manifest.json`, published only after full SQLite/FTS integrity
+   checks. Open exactly those verified bytes read-only in memory, avoiding a
+   live file handle during traversal. This detects byte and logical SQL changes
+   to the cache without parsing every cached revision or repeating SQLite
+   integrity traversal. Validate checkpoint schema/selection. Missing, damaged
+   or incompatible certificates require complete source replay. Images over 256
+   MiB use the ordinary validated checkpoint path to bound image memory; no
+   source/store-size limit is introduced.
 3. Enumerate actual memory directories and revision filenames every invocation.
    Reject unexpected paths/symlinks and report unpublished files. No timestamp
    or size is freshness evidence: restored directory times cannot hide new
@@ -43,22 +47,28 @@ integrity audit.
    but historical files need no open/read/hash. Large stores use the existing
    bounded temporary workers, with ordinary bounded traversal if workers are
    unavailable.
-4. Read/decode/validate/hash additions. Reuse validated history only for paths
-   still present. Validate the resulting complete graph and cross-store IDs. If
-   an indexed revision disappears while its memory retains other revisions, fail
-   rather than expose an earlier head. Entire removed memories leave the corpus.
-   Without a prior cache, past removals/edits cannot be reconstructed.
+4. Compare actual revision-path hashes/counts with the certified checkpoint. An
+   unchanged inventory queries FTS without loading history rows or rebuilding
+   the graph. A changed inventory loads the checkpoint, checks hash-inventory
+   completeness/cached-record digests, then reads/decodes/validates/hashes
+   additions. Reuse validated history only for paths still present. Validate the
+   resulting complete graph and cross-store IDs. If an indexed revision
+   disappears while its memory retains other revisions, fail rather than expose
+   an earlier head. Entire removed memories leave the corpus. Without a prior
+   cache, past removals/edits cannot be reconstructed.
 5. Copy compatible SQLite into a private generation under the maintenance lock.
    Transactionally update hash rows and only affected memory/FTS projections;
    commit fingerprint/checkpoint together. Check SQLite/FTS integrity, close and
-   atomically replace the generation, retaining bounded Windows sharing retries.
+   hash the closed generation and stage its certificate. Atomically replace the
+   database, then the certificate, retaining bounded Windows sharing retries.
    JSON `index.updated` denotes incremental maintenance; `index.rebuilt` denotes
    a complete rebuild.
-6. Query FTS/BM25 in a consistent read transaction. Reread actual JSONL for
-   every hit, validate it and compare normalized hashes, then return the freshly
-   decoded record. Altered/unreadable hit bytes fail retrieval. This cannot find
-   an unreturned in-place edit that makes a previously irrelevant record newly
-   relevant: use strict for that guarantee.
+6. Query FTS/BM25 in the immutable verified image (or a consistent read
+   transaction during maintenance). Reread actual JSONL for every hit, validate
+   it and compare normalized hashes, then return the freshly decoded record.
+   Altered/unreadable hit bytes fail retrieval. This cannot find an unreturned
+   in-place edit that makes a previously irrelevant record newly relevant: use
+   strict for that guarantee.
 
 Git pulls, additive merges, revision-adding conflict resolution, independent
 agents and older clients change the inventory directly. No Git HEAD shortcut or
@@ -83,10 +93,13 @@ safely. There is no atomic transaction across stores/external checkouts.
 Missing, incompatible/corrupted indexes and explicit rebuilds require complete
 authoritative replay. No partial replay is published. Updates use private
 copies: a crash leaves the old or new complete published generation, never a hot
-journal beside the published index. Unpublished cache generations are never
-selected by discovery and may be removed with the cache. Killed lock owners
-require existing manual owner-inspection recovery; locks are never stolen.
-Source temporaries remain intact.
+journal beside the published index. A crash between database and certificate
+publication leaves a checksum mismatch: fast mode performs complete source
+validation/rebuild, and `--read-only` refuses that maintenance. No mismatched
+pair is silently reused. The certificate/database stay local and rebuildable.
+Unpublished cache generations are never selected by discovery and may be removed
+with the cache. Killed lock owners require existing manual owner-inspection
+recovery; locks are never stolen. Source temporaries remain intact.
 
 Unchanged queries reuse caches read-only without cache locks/writes.
 `--read-only` refuses maintenance. Permission errors never authorize stale

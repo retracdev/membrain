@@ -66,6 +66,7 @@ export async function replayDirectories(
   location: Location,
   directories: string[],
   known?: Map<string, string[]>,
+  inventory = false,
 ): Promise<ReplayChunk | undefined> {
   const timing = channel('membrain.performance');
   const chunks: string[][] = Array.from(
@@ -83,6 +84,7 @@ export async function replayDirectories(
         location,
         directories: chunk,
         profile: timing.hasSubscribers,
+        inventory,
         ...(known ? { known: chunk.flatMap((id) => known.get(id) ?? []) } : {}),
       }),
     ),

@@ -195,6 +195,92 @@ async function mapLimit<T, R>(
   if (failed) throw failure;
   return result;
 }
+async function inspectSources(location: Location) {
+  const manifest = await readManifest(location);
+  const warnings: Warning[] = [];
+  if (!manifest)
+    return {
+      manifest,
+      binding: undefined,
+      warnings,
+      directories: [] as string[],
+    };
+  const rootStat = await lstat(location.path, { bigint: true });
+  const binding = `${hostname()}:${process.platform}:${rootStat.dev}:${rootStat.ino}:${rootStat.birthtimeNs}`;
+  const directory = path.join(location.path, 'records');
+  const directoryStat = await lstat(directory).catch(() => undefined);
+  if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink())
+    fail(
+      'CORRUPT_STORE',
+      `Missing or unsafe records directory at ${directory}.`,
+    );
+  for (const rootEntry of await readdir(location.path))
+    temporary(path.join(location.path, rootEntry), warnings);
+  const directories = (await readdir(directory, { withFileTypes: true }))
+    .filter((entry) => {
+      const subdirectory = path.join(directory, entry.name);
+      if (temporary(subdirectory, warnings)) return false;
+      if (!entry.isDirectory() || entry.isSymbolicLink())
+        fail('CORRUPT_STORE', `Unexpected source path at ${subdirectory}.`);
+      try {
+        uuid(entry.name);
+      } catch {
+        fail('CORRUPT_STORE', `Invalid memory directory at ${subdirectory}.`);
+      }
+      return true;
+    })
+    .map((entry) => entry.name);
+  return { manifest, binding, warnings, directories };
+}
+
+export function pathsFingerprint(paths: string[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify([...paths].sort()))
+    .digest('hex');
+}
+
+export async function readInventory(location: Location) {
+  const finish = span('store.inventory');
+  try {
+    const inspected = await inspectSources(location);
+    const chunk =
+      inspected.directories.length >= 1000
+        ? await replayDirectories(
+            location,
+            inspected.directories,
+            undefined,
+            true,
+          )
+        : undefined;
+    const names =
+      chunk?.reused ??
+      (
+        await mapLimit(inspected.directories, async (id) => {
+          const directory = path.join(location.path, 'records', id);
+          return (await readdir(directory, { withFileTypes: true })).flatMap(
+            (entry) => {
+              const source = sourceFile(
+                entry,
+                directory,
+                id,
+                inspected.warnings,
+              );
+              return source ? [`${id}/${source.revisionId}`] : [];
+            },
+          );
+        })
+      ).flat();
+    if (chunk) inspected.warnings.push(...chunk.warnings);
+    return {
+      ...inspected,
+      pathsHash: pathsFingerprint(names),
+      revisions: names.length,
+    };
+  } finally {
+    finish();
+  }
+}
+
 export async function readStore(
   location: Location,
   timing?: ReplayTiming,
@@ -202,8 +288,8 @@ export async function readStore(
 ): Promise<Snapshot> {
   const started = performance.now();
   const finishEnumeration = span('store.enumeration');
-  const manifest = await readManifest(location);
-  const warnings: Warning[] = [];
+  const { manifest, binding, warnings, directories } =
+    await inspectSources(location);
   if (!manifest)
     return {
       location,
@@ -213,10 +299,7 @@ export async function readStore(
       hashes: [],
       warnings,
     };
-  const rootStat = await lstat(location.path, { bigint: true });
-  const binding = `${hostname()}:${process.platform}:${rootStat.dev}:${rootStat.ino}:${rootStat.birthtimeNs}`;
-  // Cache provenance is local to this filesystem object and manifest identity.
-  // A copied/moved store or changed manifest requires complete verification.
+  // Checkpoints are local to this filesystem object and manifest identity.
   if (
     cached?.binding !== binding ||
     JSON.stringify(cached.manifest) !== JSON.stringify(manifest)
@@ -237,34 +320,12 @@ export async function readStore(
     }
   }
   const directory = path.join(location.path, 'records');
-  const directoryStat = await lstat(directory).catch(() => undefined);
-  if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink())
-    fail(
-      'CORRUPT_STORE',
-      `Missing or unsafe records directory at ${directory}.`,
-    );
-  for (const rootEntry of await readdir(location.path))
-    temporary(path.join(location.path, rootEntry), warnings);
-  const directories = (
-    await readdir(directory, { withFileTypes: true })
-  ).filter((entry) => {
-    const subdirectory = path.join(directory, entry.name);
-    if (temporary(subdirectory, warnings)) return false;
-    if (!entry.isDirectory() || entry.isSymbolicLink())
-      fail('CORRUPT_STORE', `Unexpected source path at ${subdirectory}.`);
-    try {
-      uuid(entry.name);
-    } catch {
-      fail('CORRUPT_STORE', `Invalid memory directory at ${subdirectory}.`);
-    }
-    return true;
-  });
   async function enumerate(): Promise<SourceFile[]> {
     const files: SourceFile[] = [];
-    await mapLimit(directories, async (entry) => {
-      const subdirectory = path.join(directory, entry.name);
+    await mapLimit(directories, async (id) => {
+      const subdirectory = path.join(directory, id);
       for (const file of await readdir(subdirectory, { withFileTypes: true })) {
-        const source = sourceFile(file, subdirectory, entry.name, warnings);
+        const source = sourceFile(file, subdirectory, id, warnings);
         if (source) files.push(source);
       }
     });
@@ -281,7 +342,7 @@ export async function readStore(
   const chunk = threaded
     ? await replayDirectories(
         location,
-        directories.map((entry) => entry.name),
+        directories,
         cached ? byDirectory : undefined,
       )
     : undefined;

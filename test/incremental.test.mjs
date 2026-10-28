@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import { parseConfig } from '../dist/config.js';
 import { MemoryEngine } from '../dist/engine/engine.js';
 import { populateFixture } from '../fixtures/performance-store.mjs';
+import { manifestPath } from '../dist/index/generation.js';
 
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 async function fixture(t, count = 12) {
@@ -101,6 +102,10 @@ for (const count of [12, 1000])
       assert.deepEqual(warm.results, f.initial.results);
       assert.equal(warm.index.rebuilt, false);
       assert.equal(
+        events.some(({ name }) => name === 'store.projection'),
+        false,
+      );
+      assert.equal(
         events.filter(({ name }) => name === 'store.validationCpu').length,
         warm.results.length,
       );
@@ -152,6 +157,23 @@ test('external tombstones, timestamp anomalies, supersession and missing history
   await rm(file);
   for (const verification of ['fast', 'strict'])
     await assert.rejects(f.query({ verification }), { code: 'CORRUPT_STORE' });
+});
+
+test('missing and damaged generation manifests require full validation without stale read-only fallback', async (t) => {
+  const f = await fixture(t);
+  const marker = manifestPath(f.initial.index.path);
+  await rm(marker);
+  await assert.rejects(f.query({ readOnly: true }), {
+    code: 'INDEX_READ_ONLY',
+  });
+  assert.equal((await f.query()).index.rebuilt, true);
+  await writeFile(marker, '{"version":1,"sha256":"incomplete"}');
+  await assert.rejects(f.query({ readOnly: true }), {
+    code: 'INDEX_READ_ONLY',
+  });
+  const recovered = await f.query();
+  assert.deepEqual(recovered.results, f.initial.results);
+  assert.ok(recovered.warnings.some(({ code }) => code === 'INDEX_RECOVERED'));
 });
 
 test('same-size restored-time edits expose the explicit fast/strict boundary without returning changed bytes', async (t) => {
@@ -440,55 +462,75 @@ test('fast returned CRLF revisions retain integrity and logical checkpoint damag
   assert.deepEqual((await f.query()).results, f.initial.results);
 });
 
-test(
-  'killing incremental maintenance before publication preserves the old generation and recovers a tombstone',
-  { timeout: 30_000 },
-  async (t) => {
-    const f = await fixture(t);
-    const before = await readFile(f.initial.index.path);
-    const deleted = f.initial.results[0].record;
-    await f.publish(next(deleted, { status: 'deleted' }));
-    const crasher = fileURLToPath(
-      new URL('../fixtures/index-crash.mjs', import.meta.url),
-    );
-    const child = spawn(process.execPath, [crasher, f.filename, f.cache], {
-      cwd: f.directory,
-      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    });
-    let stderr = '';
-    child.stderr.on('data', (part) => {
-      stderr += part;
-    });
-    t.after(() => {
-      if (child.exitCode === null) child.kill();
-    });
-    const exited = once(child, 'exit');
-    const reached = await Promise.race([
-      once(child, 'message'),
-      exited.then(() => {
-        throw new Error(`Crash fixture exited early: ${stderr}`);
-      }),
-    ]);
-    assert.equal(reached[0].stage, 'before-index-publication');
-    child.kill('SIGKILL');
-    await exited;
-    assert.deepEqual(await readFile(f.initial.index.path), before);
-    const lock = path.join(
-      path.dirname(f.initial.index.path),
-      '.membrain-lock',
-    );
-    const owner = JSON.parse(
-      await readFile(path.join(lock, 'owner.json'), 'utf8'),
-    );
-    assert.equal(owner.pid, child.pid);
-    await rm(lock, { recursive: true }); // Only this known dead fixture owner is recovered.
-    const recovered = await f.query();
-    assert.equal(recovered.index.updated, true);
-    assert.ok(
-      recovered.results.every(({ record }) => record.id !== deleted.id),
-    );
-  },
-);
+for (const checkpoint of ['index', 'manifest'])
+  test(
+    `killing incremental maintenance before ${checkpoint} publication recovers a tombstone`,
+    { timeout: 30_000 },
+    async (t) => {
+      const f = await fixture(t);
+      const before = await readFile(f.initial.index.path);
+      const deleted = f.initial.results[0].record;
+      await f.publish(next(deleted, { status: 'deleted' }));
+      const crasher = fileURLToPath(
+        new URL('../fixtures/index-crash.mjs', import.meta.url),
+      );
+      const child = spawn(
+        process.execPath,
+        [crasher, f.filename, f.cache, checkpoint],
+        {
+          cwd: f.directory,
+          stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        },
+      );
+      let stderr = '';
+      child.stderr.on('data', (part) => {
+        stderr += part;
+      });
+      t.after(() => {
+        if (child.exitCode === null) child.kill();
+      });
+      const exited = once(child, 'exit');
+      const reached = await Promise.race([
+        once(child, 'message'),
+        exited.then(() => {
+          throw new Error(`Crash fixture exited early: ${stderr}`);
+        }),
+      ]);
+      assert.equal(reached[0].stage, `before-${checkpoint}-publication`);
+      child.kill('SIGKILL');
+      await exited;
+      if (checkpoint === 'index')
+        assert.deepEqual(await readFile(f.initial.index.path), before);
+      else {
+        const published = new Database(f.initial.index.path, {
+          readonly: true,
+        });
+        assert.equal(
+          published.pragma('integrity_check', { simple: true }),
+          'ok',
+        );
+        published.close();
+        await assert.rejects(f.query({ readOnly: true }), {
+          code: 'INDEX_READ_ONLY',
+        });
+      }
+      const lock = path.join(
+        path.dirname(f.initial.index.path),
+        '.membrain-lock',
+      );
+      const owner = JSON.parse(
+        await readFile(path.join(lock, 'owner.json'), 'utf8'),
+      );
+      assert.equal(owner.pid, child.pid);
+      await rm(lock, { recursive: true }); // Only this known dead fixture owner is recovered.
+      const recovered = await f.query();
+      if (checkpoint === 'index') assert.equal(recovered.index.updated, true);
+      else assert.equal(recovered.index.rebuilt, true);
+      assert.ok(
+        recovered.results.every(({ record }) => record.id !== deleted.id),
+      );
+    },
+  );
 
 test('fast corpora isolate global/project/session memory and explicit promotion', async (t) => {
   const f = await fixture(t);

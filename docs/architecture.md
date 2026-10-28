@@ -307,13 +307,15 @@ migrations are versioned, opt-in, and tested with older fixtures.
 
 Phase 8 retains the following strict verification as the compatibility default.
 Explicit `--verification fast` scans actual revision paths, reuses local
-validated history, verifies additions and returned bytes, and incrementally
-updates affected memories on a private SQLite copy. It cannot prove unreturned
-historical bytes were not edited in place; strict/rebuild is required for that
-guarantee. No timestamp-only, Git-HEAD-only or cooperative-journal-only decision
-is used. See [index-freshness.md](index-freshness.md) for the exact
-consistency/recovery contract. SQLite schema 2 is disposable; config/JSONL
-remain schema 1.
+checksum-certified SQLite generation, verifies additions and returned bytes, and
+incrementally updates affected memories on a private SQLite copy. It cannot
+prove unreturned historical bytes were not edited in place; strict/rebuild is
+required for that guarantee. No timestamp-only, Git-HEAD-only or
+cooperative-journal-only decision is used. See
+[index-freshness.md](index-freshness.md) for the exact consistency/recovery
+contract. Unchanged fast reads verify one index image and actual revision-path
+inventory, avoiding cached-history replay. SQLite schema 3 and its local
+checksum certificate are disposable; config/JSONL remain schema 1.
 
 Before retrieval, validate and hash a scan of the source files. Reuse a current
 projection through a read-only SQLite connection without cache writes or locks;

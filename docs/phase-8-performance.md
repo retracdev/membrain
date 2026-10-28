@@ -11,10 +11,13 @@ metadata/read/validation/hash work before each query. SQLite ranking is
 secondary. Phase 8 explicit fast mode enumerates actual paths and reuses
 validated history, validates new revisions, rechecks graph/scope identity,
 incrementally projects affected memories and verifies returned bytes. SQLite
-schema 2 checkpoints remain disposable and local. Maintenance updates a private
-copy transactionally, validates it, then publishes atomically; interrupted
-maintenance cannot expose partial entries or FTS state. No dependency,
-source/config migration, Git journal, service or daemon was added.
+schema 3 checkpoints and checksum certificates remain disposable and local. An
+unchanged fast read verifies one index image and actual paths, queries the
+read-only image, and checks returned JSONL without loading history rows.
+Maintenance updates a private copy transactionally, validates it, then publishes
+atomically; interrupted maintenance cannot expose partial entries or FTS state.
+No dependency, source/config migration, Git journal, service or daemon was
+added.
 
 Strict remains the compatibility default because fast cannot detect all
 unreturned in-place edits, including same-size edits with restored timestamps.

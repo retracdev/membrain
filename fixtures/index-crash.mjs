@@ -7,9 +7,14 @@ import { MemoryEngine } from '../dist/engine/engine.js';
 // Test-only checkpoint after the private SQLite generation is complete, before
 // publication. No production crash switches or user configuration are needed.
 const original = fs.rename;
+const checkpoint = process.argv[4] ?? 'index';
 fs.rename = async (...args) => {
-  if (args[1].endsWith('index.sqlite')) {
-    process.send({ stage: 'before-index-publication' });
+  if (
+    args[1].endsWith(
+      checkpoint === 'index' ? 'index.sqlite' : 'index.sqlite.manifest.json',
+    )
+  ) {
+    process.send({ stage: `before-${checkpoint}-publication` });
     await new Promise(() => {});
   }
   return original(...args);

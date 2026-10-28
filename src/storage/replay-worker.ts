@@ -14,6 +14,7 @@ export interface ReplayJob {
   directories: string[];
   profile: boolean;
   known?: string[];
+  inventory?: boolean;
 }
 export interface Metric {
   name: string;
@@ -79,7 +80,7 @@ try {
       const source = sourceFile(entry, directory, id, warnings);
       if (!source) continue;
       const key = `${id}/${source.revisionId}`;
-      if (known.has(key)) {
+      if (job.inventory || known.has(key)) {
         reused.push(key);
         continue;
       }
