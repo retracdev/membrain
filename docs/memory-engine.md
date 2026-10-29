@@ -1,5 +1,14 @@
 # Memory engine: implemented Phase 2 behavior
 
+Phase 8 preserves strict source verification as the default and adds explicit
+`--verification fast` to recall/search/list. Unchanged fast reads use a
+certified local index image and actual revision-path inventory, verifying
+returned bytes; unreturned in-place edits require strict verification. See
+[index-freshness.md](index-freshness.md) and
+[phase-8-performance.md](phase-8-performance.md) for the current contract and
+measured limits. The older full-verification descriptions below remain the
+default behavior.
+
 Membrain now stores and retrieves memories offline. `remember`, `recall`,
 `search`, `list`, `update`, and `forget` are implemented. Phase 3 adds
 [interactive/non-interactive init](initialization.md); Phase 4 adds optional

@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { channel } from 'node:diagnostics_channel';
+import { availableParallelism } from 'node:os';
 import type { Location } from '../engine/scopes.js';
 import { MembrainError } from '../errors.js';
 import type { ReplayChunk, ReplayJob, ReplayReply } from './replay-worker.js';
@@ -65,10 +66,13 @@ async function run(job: ReplayJob): Promise<ReplayChunk> {
 export async function replayDirectories(
   location: Location,
   directories: string[],
+  known?: Map<string, string[]>,
+  inventory = false,
 ): Promise<ReplayChunk | undefined> {
   const timing = channel('membrain.performance');
+  const parallelism = inventory ? Math.min(4, availableParallelism()) : limit;
   const chunks: string[][] = Array.from(
-    { length: Math.min(limit, directories.length) },
+    { length: Math.min(parallelism, directories.length) },
     () => [],
   );
   directories.forEach((directory, i) =>
@@ -78,7 +82,13 @@ export async function replayDirectories(
   // store lock or letting a fixture clean up source directories.
   const results = await Promise.allSettled(
     chunks.map((chunk) =>
-      run({ location, directories: chunk, profile: timing.hasSubscribers }),
+      run({
+        location,
+        directories: chunk,
+        profile: timing.hasSubscribers,
+        inventory,
+        ...(known ? { known: chunk.flatMap((id) => known.get(id) ?? []) } : {}),
+      }),
     ),
   );
   for (const result of results)
@@ -95,10 +105,12 @@ export async function replayDirectories(
     return undefined;
   }
   const loaded: ReplayChunk['loaded'] = [];
+  const reused: string[] = [];
   const warnings: ReplayChunk['warnings'] = [];
   for (const result of results) {
     if (result.status === 'rejected') throw result.reason;
     for (const item of result.value.loaded) loaded.push(item);
+    reused.push(...result.value.reused);
     for (const warning of result.value.warnings) warnings.push(warning);
     for (const metric of result.value.metrics) timing.publish(metric);
   }
@@ -113,5 +125,5 @@ export async function replayDirectories(
             ? 1
             : 0,
   );
-  return { loaded, warnings, metrics: [] };
+  return { loaded, reused, warnings, metrics: [] };
 }

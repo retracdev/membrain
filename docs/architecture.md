@@ -1,11 +1,12 @@
 # Membrain architecture specification
 
-Status: Phase 7 source replay performance work, Phase 6 reliability and release
-preparation, portable skill export, optional Git synchronization, initialization
-and local memory implemented. Reviewed 2026-10-27. Performance remains
-release-blocking. See [implementation-plan.md](implementation-plan.md) for
-delivery gates, [memory-engine.md](memory-engine.md) for implemented behavior,
-and [initialization.md](initialization.md) for setup/preservation contracts,
+Status: Phase 8 explicit fast verification/incremental indexing, Phase 7 source
+replay performance work, Phase 6 reliability and release preparation, portable
+skill export, optional Git synchronization, initialization and local memory
+implemented. Reviewed 2026-10-27. Performance remains release-blocking. See
+[implementation-plan.md](implementation-plan.md) for delivery gates,
+[memory-engine.md](memory-engine.md) for implemented behavior, and
+[initialization.md](initialization.md) for setup/preservation contracts,
 [git-synchronization.md](git-synchronization.md) for sync safety and
 limitations, [research.md](research.md) for validation and primary sources.
 
@@ -303,6 +304,18 @@ authorization and backup. Do not auto-rewrite or delete source records. Schema
 migrations are versioned, opt-in, and tested with older fixtures.
 
 ## Index and deterministic retrieval
+
+Phase 8 retains the following strict verification as the compatibility default.
+Explicit `--verification fast` scans actual revision paths, reuses local
+checksum-certified SQLite generation, verifies additions and returned bytes, and
+incrementally updates affected memories on a private SQLite copy. It cannot
+prove unreturned historical bytes were not edited in place; strict/rebuild is
+required for that guarantee. No timestamp-only, Git-HEAD-only or
+cooperative-journal-only decision is used. See
+[index-freshness.md](index-freshness.md) for the exact consistency/recovery
+contract. Unchanged fast reads verify one index image and actual revision-path
+inventory, avoiding cached-history replay. SQLite schema 3 and its local
+checksum certificate are disposable; config/JSONL remain schema 1.
 
 Before retrieval, validate and hash a scan of the source files. Reuse a current
 projection through a read-only SQLite connection without cache writes or locks;

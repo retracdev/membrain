@@ -29,6 +29,7 @@ if (isMainThread) {
     'lstat',
     'readdir',
     'readFile',
+    'copyFile',
     'realpath',
     'mkdir',
     'rename',

@@ -84,7 +84,12 @@ test('unchanged retrieval needs no filesystem write permission or index lock', a
   const lock = path.join(path.dirname(f.index), '.membrain-lock');
   await mkdir(lock); // Existing readers do not wait for maintenance locks.
   const before = await tree(f.directory);
-  for (const mode of [[], ['--read-only']]) {
+  for (const mode of [
+    [],
+    ['--read-only'],
+    ['--verification', 'fast'],
+    ['--verification', 'fast', '--read-only'],
+  ]) {
     const result = spawnSync(
       process.execPath,
       [
@@ -239,15 +244,19 @@ test('unavailable index directories report an actionable error and preserve dura
   const blocker = path.join(f.directory, 'not-a-directory');
   await writeFile(blocker, 'preserve');
   const engine = new MemoryEngine(f.config, f.directory, blocker);
-  await assert.rejects(
-    engine.query({ scope: 'global' }, { query: 'SQLite', limit: 5 }),
-    (error) => {
-      assert.equal(error.code, 'INDEX_UNAVAILABLE');
-      assert.match(error.message, /MEMBRAIN_CACHE_DIR/u);
-      assert.match(error.message, /permissions/u);
-      return true;
-    },
-  );
+  for (const verification of ['strict', 'fast'])
+    await assert.rejects(
+      engine.query(
+        { scope: 'global' },
+        { query: 'SQLite', limit: 5, verification },
+      ),
+      (error) => {
+        assert.equal(error.code, 'INDEX_UNAVAILABLE');
+        assert.match(error.message, /MEMBRAIN_CACHE_DIR/u);
+        assert.match(error.message, /permissions/u);
+        return true;
+      },
+    );
   assert.equal(await readFile(blocker, 'utf8'), 'preserve');
   assert.equal(
     JSON.parse(await readFile(f.source, 'utf8')).revisionId,
@@ -267,6 +276,11 @@ test(
       await chmod(f.cache, 0o500);
       assert.equal((await f.query()).index.rebuilt, false);
       assert.equal((await f.query({ readOnly: true })).results.length, 1);
+      assert.equal(
+        (await f.query({ readOnly: true, verification: 'fast' })).results
+          .length,
+        1,
+      );
       await assert.rejects(f.query({ rebuild: true }), {
         code: 'INDEX_UNAVAILABLE',
       });
@@ -319,6 +333,11 @@ test(
       acl('/deny', `*${sid}:(WD,AD)`);
       assert.equal((await f.query()).index.rebuilt, false);
       assert.equal((await f.query({ readOnly: true })).results.length, 1);
+      assert.equal(
+        (await f.query({ readOnly: true, verification: 'fast' })).results
+          .length,
+        1,
+      );
       await assert.rejects(f.query({ rebuild: true }), {
         code: 'INDEX_UNAVAILABLE',
       });

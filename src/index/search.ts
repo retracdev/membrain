@@ -1,21 +1,30 @@
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { chmod, lstat, rename, unlink } from 'node:fs/promises';
+import { chmod, copyFile, lstat, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import {
   canonical,
   contains,
   safeDirectory,
   withLock,
   errno,
+  regularFile,
 } from '../storage/files.js';
+import {
+  pathsFingerprint,
+  readInventory,
+  readStore,
+  validateManifest,
+} from '../storage/store.js';
 import type { Snapshot } from '../storage/store.js';
-import { fail } from '../engine/model.js';
+import type { Location } from '../engine/scopes.js';
+import { decodeRevision } from '../storage/revision.js';
+import { fail, isObject, uuid, validateRevision } from '../engine/model.js';
 import type { Revision, State, Warning } from '../engine/model.js';
 import { MembrainError } from '../errors.js';
 import { span } from '../profile.js';
+import { publishGeneration, readGeneration } from './generation.js';
 
 export interface QueryOptions {
   query?: string;
@@ -27,6 +36,7 @@ export interface QueryOptions {
   rebuild?: boolean;
   readOnly?: boolean;
   literal?: boolean;
+  verification?: 'strict' | 'fast';
 }
 export interface Hit {
   record: Revision;
@@ -36,7 +46,13 @@ export interface Hit {
 }
 export interface QueryResult {
   results: Hit[];
-  index: { path: string; rebuilt: boolean; revisions: number };
+  index: {
+    path: string;
+    rebuilt: boolean;
+    revisions: number;
+    updated?: boolean;
+    verification?: 'strict' | 'fast';
+  };
   warnings: Warning[];
 }
 
@@ -84,7 +100,426 @@ export function defaultCacheRoot(): string {
       ),
   );
 }
-const schemaVersion = '1';
+const schemaVersion = '3';
+
+function indexUnavailable(directory: string): never {
+  fail(
+    'INDEX_UNAVAILABLE',
+    `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
+  );
+}
+
+async function indexPath(
+  locations: Location[],
+  protectedRoots: string[],
+  cacheRoot: string,
+): Promise<string> {
+  try {
+    cacheRoot = await canonical(cacheRoot);
+    for (const root of protectedRoots) {
+      const source = await canonical(root);
+      if (contains(source, cacheRoot) || contains(cacheRoot, source))
+        fail(
+          'UNSAFE_CACHE_PATH',
+          'Cache and memory storage directories must not overlap. Set MEMBRAIN_CACHE_DIR to a separate local directory.',
+        );
+    }
+    const key = createHash('sha256')
+      .update(
+        JSON.stringify(
+          [...locations].sort((a, b) => (a.path < b.path ? -1 : 1)),
+        ),
+      )
+      .digest('hex');
+    const directory = path.join(cacheRoot, key);
+    for (const [file, directoryExpected] of [
+      [directory, true],
+      [path.join(directory, 'index.sqlite'), false],
+    ] as const) {
+      const stat = await lstat(file).catch((error: unknown) => {
+        if (errno(error) === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (
+        stat &&
+        (stat.isSymbolicLink() ||
+          (directoryExpected ? !stat.isDirectory() : !stat.isFile()))
+      )
+        fail('UNSAFE_CACHE_PATH', `Unsafe index path at ${file}.`);
+    }
+    return path.join(directory, 'index.sqlite');
+  } catch (error) {
+    if (error instanceof MembrainError) throw error;
+    indexUnavailable(cacheRoot);
+  }
+}
+
+function checkpoint(snapshots: Snapshot[]): string {
+  return JSON.stringify(
+    snapshots.map(({ location, manifest, binding, fingerprint, records }) => ({
+      location,
+      manifest,
+      binding,
+      fingerprint,
+      recordsHash: createHash('sha256')
+        .update(JSON.stringify(records))
+        .digest('hex'),
+      pathsHash: pathsFingerprint(
+        records.map((record) => `${record.id}/${record.revisionId}`),
+      ),
+      revisions: records.length,
+    })),
+  );
+}
+
+interface Checkpoint extends Pick<
+  Snapshot,
+  'location' | 'manifest' | 'binding' | 'fingerprint'
+> {
+  recordsHash: string;
+  pathsHash: string;
+  revisions: number;
+}
+function readCheckpoint(
+  db: Database.Database,
+  locations: Location[],
+): Checkpoint[] {
+  const value = db
+    .prepare("SELECT value FROM settings WHERE key='checkpoint'")
+    .pluck()
+    .get();
+  const metadata: unknown = JSON.parse(String(value));
+  if (!Array.isArray(metadata) || metadata.length !== locations.length)
+    throw new Error('Invalid checkpoint selection');
+  const seen = new Set<string>();
+  return metadata.map((item: unknown): Checkpoint => {
+    if (
+      !isObject(item) ||
+      Object.keys(item).some(
+        (key) =>
+          ![
+            'location',
+            'manifest',
+            'binding',
+            'fingerprint',
+            'recordsHash',
+            'pathsHash',
+            'revisions',
+          ].includes(key),
+      ) ||
+      typeof item.fingerprint !== 'string' ||
+      typeof item.recordsHash !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(item.recordsHash) ||
+      typeof item.pathsHash !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(item.pathsHash) ||
+      !Number.isSafeInteger(item.revisions) ||
+      (item.revisions as number) < 0 ||
+      (item.binding !== undefined && typeof item.binding !== 'string')
+    )
+      throw new Error('Invalid checkpoint metadata');
+    const location = locations.find(
+      (location) => JSON.stringify(location) === JSON.stringify(item.location),
+    );
+    if (!location || seen.has(location.path))
+      throw new Error('Invalid checkpoint location');
+    seen.add(location.path);
+    return {
+      location,
+      fingerprint: item.fingerprint,
+      recordsHash: item.recordsHash,
+      pathsHash: item.pathsHash,
+      revisions: item.revisions as number,
+      ...(item.binding === undefined ? {} : { binding: item.binding }),
+      ...(item.manifest === undefined
+        ? {}
+        : { manifest: validateManifest(item.manifest, location) }),
+    };
+  });
+}
+
+async function currentGeneration(
+  file: string,
+  locations: Location[],
+  options: QueryOptions,
+): Promise<{ result?: QueryResult; invalid: boolean }> {
+  const exists = await lstat(file).catch((error: unknown) => {
+    if (errno(error) === 'ENOENT') return undefined;
+    indexUnavailable(path.dirname(file));
+  });
+  if (!exists) return { invalid: false };
+  let db: Database.Database | undefined;
+  let metadata: Checkpoint[];
+  try {
+    const image = await readGeneration(file);
+    if (!image) return { invalid: false };
+    db = new Database(image, { readonly: true });
+    db.exec(
+      'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;',
+    );
+    if (
+      db
+        .prepare("SELECT value FROM settings WHERE key='version'")
+        .pluck()
+        .get() !== schemaVersion
+    )
+      throw new Error('Incompatible checkpoint');
+    metadata = readCheckpoint(db, locations);
+  } catch (error) {
+    db?.close();
+    if (error instanceof MembrainError && error.code === 'UNSAFE_CACHE_PATH')
+      throw error;
+    return { invalid: true };
+  }
+  try {
+    const inventory = await Promise.all(
+      metadata.map((item) => readInventory(item.location)),
+    );
+    if (
+      metadata.some(
+        (item, i) =>
+          item.binding !== inventory[i]!.binding ||
+          JSON.stringify(item.manifest) !==
+            JSON.stringify(inventory[i]!.manifest) ||
+          item.pathsHash !== inventory[i]!.pathsHash ||
+          item.revisions !== inventory[i]!.revisions,
+      )
+    )
+      return { invalid: false };
+    let rows: QueryRow[];
+    try {
+      rows = queryRows(db, options);
+    } catch (error) {
+      if (error instanceof MembrainError) throw error;
+      return { invalid: true };
+    }
+    const hash = db.prepare<[string], { hash: string }>(
+      'SELECT hash FROM hashes WHERE key=?',
+    );
+    const results: Hit[] = [];
+    for (const row of rows) {
+      try {
+        uuid(row.id);
+        uuid(row.revisionId);
+      } catch {
+        return { invalid: true };
+      }
+      const owners = locations.flatMap((location) => {
+        const value = hash.get(`${location.path}:${row.revisionId}`);
+        return value ? [{ location, hash: value.hash }] : [];
+      });
+      if (owners.length !== 1) return { invalid: true };
+      const owner = owners[0]!;
+      const source = path.join(
+        owner.location.path,
+        'records',
+        row.id,
+        `${row.revisionId}.jsonl`,
+      );
+      await regularFile(source);
+      const checked = decodeRevision(
+        await readFile(source),
+        { file: source, id: row.id, revisionId: row.revisionId },
+        owner.location,
+      );
+      if (checked.hash !== owner.hash)
+        fail(
+          'CORRUPT_STORE',
+          'An immutable source revision changed since it was indexed. Use strict verification and inspect its provenance.',
+        );
+      results.push({
+        record: checked.record,
+        conflict: row.conflict === 1,
+        historical: row.head !== 1,
+        ...(row.score === undefined ? {} : { score: row.score }),
+      });
+    }
+    return {
+      invalid: false,
+      result: {
+        results,
+        index: {
+          path: file,
+          rebuilt: false,
+          revisions: inventory.reduce((sum, item) => sum + item.revisions, 0),
+          verification: 'fast',
+        },
+        warnings: inventory.flatMap((item) => item.warnings),
+      },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+// Fast retrieval still enumerates actual source paths on every invocation.
+// Only a compatible, local checkpoint can supply previously verified bytes.
+export async function queryStores(
+  locations: Location[],
+  options: QueryOptions,
+  protectedRoots: string[],
+  cacheRoot = defaultCacheRoot(),
+  attempt = 0,
+): Promise<QueryResult> {
+  validateQueryOptions(options);
+  const file = await indexPath(locations, protectedRoots, cacheRoot);
+  let cached: Snapshot[] = [];
+  const recordsHashes = new Map<string, string>();
+  const current = options.rebuild
+    ? { invalid: false }
+    : await currentGeneration(file, locations, options);
+  if (current.result) return current.result;
+  let checkpointDamaged = current.invalid;
+  let db: Database.Database | undefined;
+  if (!options.rebuild && !checkpointDamaged) {
+    try {
+      db = new Database(file, { readonly: true, fileMustExist: true });
+      db.exec(
+        'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; BEGIN',
+      );
+      if (db.pragma('integrity_check', { simple: true }) !== 'ok')
+        throw new Error('Damaged checkpoint');
+      if (
+        db
+          .prepare("SELECT value FROM settings WHERE key='version'")
+          .pluck()
+          .get() === schemaVersion
+      ) {
+        const metadata = readCheckpoint(db, locations);
+        for (const item of metadata)
+          recordsHashes.set(item.location.path, item.recordsHash);
+        cached = metadata.map((item) => ({
+          ...item,
+          records: [],
+          entries: [],
+          hashes: [],
+          warnings: [],
+        }));
+        const rows = db
+          .prepare<[], { key: string; hash: string; record: string }>(
+            'SELECT key,hash,record FROM hashes',
+          )
+          .all();
+        for (const snapshot of cached) {
+          snapshot.records = [];
+          snapshot.hashes = [];
+          for (const row of rows) {
+            if (
+              row.key.slice(0, row.key.lastIndexOf(':')) !==
+              snapshot.location.path
+            )
+              continue;
+            const record = validateRevision(JSON.parse(row.record) as unknown);
+            if (
+              row.key !== `${snapshot.location.path}:${record.revisionId}` ||
+              record.scope !== snapshot.location.scope ||
+              record.projectId !== snapshot.location.projectId ||
+              record.sessionId !== snapshot.location.sessionId ||
+              !/^[a-f0-9]{64}$/u.test(row.hash)
+            )
+              throw new Error('Invalid checkpoint');
+            snapshot.records.push(record);
+            snapshot.hashes.push({
+              revisionId: record.revisionId,
+              hash: row.hash,
+            });
+          }
+          const hashes = new Map(
+            snapshot.hashes.map((item) => [item.revisionId, item.hash]),
+          );
+          snapshot.records.sort((a, b) =>
+            a.id < b.id
+              ? -1
+              : a.id > b.id
+                ? 1
+                : a.revisionId < b.revisionId
+                  ? -1
+                  : a.revisionId > b.revisionId
+                    ? 1
+                    : 0,
+          );
+          const fingerprint = snapshot.manifest
+            ? createHash('sha256')
+                .update(JSON.stringify(snapshot.manifest))
+                .update(
+                  snapshot.records
+                    .map(
+                      (record) =>
+                        `${record.revisionId}:${hashes.get(record.revisionId)}`,
+                    )
+                    .join('\n'),
+                )
+                .digest('hex')
+            : 'empty';
+          if (fingerprint !== snapshot.fingerprint)
+            throw new Error('Incomplete checkpoint');
+          if (
+            createHash('sha256')
+              .update(JSON.stringify(snapshot.records))
+              .digest('hex') !== recordsHashes.get(snapshot.location.path)
+          )
+            throw new Error('Changed checkpoint records');
+        }
+      }
+    } catch {
+      cached = [];
+      checkpointDamaged = db !== undefined;
+    } finally {
+      db?.close();
+    }
+  }
+  const snapshots = await Promise.all(
+    locations.map((location) =>
+      readStore(
+        location,
+        undefined,
+        cached.find(
+          (item) => JSON.stringify(item.location) === JSON.stringify(location),
+        ),
+      ),
+    ),
+  );
+  if (checkpointDamaged && options.readOnly)
+    fail(
+      'INDEX_READ_ONLY',
+      'Read-only retrieval needs a valid index checkpoint. Retry without --read-only to rebuild from JSONL.',
+    );
+  let result: QueryResult;
+  try {
+    result = await queryIndex(
+      snapshots,
+      checkpointDamaged ? { ...options, rebuild: true } : options,
+      protectedRoots,
+      cacheRoot,
+    );
+  } catch (error) {
+    if (error instanceof MembrainError && error.code === 'SOURCE_CHANGED') {
+      if (attempt < 2)
+        return queryStores(
+          locations,
+          options,
+          protectedRoots,
+          cacheRoot,
+          attempt + 1,
+        );
+      fail(
+        'CORRUPT_STORE',
+        'Source/index changed repeatedly during retrieval. Retry after writers finish; inspect missing revision history if the error persists.',
+      );
+    }
+    throw error;
+  }
+  if (
+    checkpointDamaged &&
+    !result.warnings.some((item) => item.code === 'INDEX_RECOVERED')
+  )
+    result.warnings.push({
+      code: 'INDEX_RECOVERED',
+      message:
+        'The disposable checkpoint was damaged and has been rebuilt from validated JSONL.',
+    });
+  result.index.verification = 'fast';
+  return result;
+}
 
 function populate(
   db: Database.Database,
@@ -93,11 +528,12 @@ function populate(
 ): void {
   db.exec(`PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
     CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    CREATE TABLE hashes(key TEXT PRIMARY KEY, hash TEXT NOT NULL);
+    CREATE TABLE hashes(key TEXT PRIMARY KEY, hash TEXT NOT NULL, record TEXT NOT NULL);
     CREATE TABLE entries(revisionId TEXT PRIMARY KEY, id TEXT NOT NULL, status TEXT NOT NULL, head INTEGER NOT NULL, conflict INTEGER NOT NULL, tags TEXT NOT NULL);
+    CREATE INDEX entries_memory ON entries(id);
     CREATE VIRTUAL TABLE fts USING fts5(content, tags, revisionId UNINDEXED, tokenize='unicode61');`);
   const settings = db.prepare('INSERT INTO settings VALUES (?, ?)');
-  const hash = db.prepare('INSERT INTO hashes VALUES (?, ?)');
+  const hash = db.prepare('INSERT INTO hashes VALUES (?, ?, ?)');
   const entry = db.prepare('INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?)');
   const fts = db.prepare(
     'INSERT INTO fts(content, tags, revisionId) VALUES (?, ?, ?)',
@@ -105,9 +541,17 @@ function populate(
   db.transaction(() => {
     settings.run('version', schemaVersion);
     settings.run('fingerprint', fingerprint);
+    settings.run('checkpoint', checkpoint(snapshots));
     for (const snapshot of snapshots) {
+      const records = new Map(
+        snapshot.records.map((record) => [record.revisionId, record]),
+      );
       for (const item of snapshot.hashes)
-        hash.run(`${snapshot.location.path}:${item.revisionId}`, item.hash);
+        hash.run(
+          `${snapshot.location.path}:${item.revisionId}`,
+          item.hash,
+          JSON.stringify(records.get(item.revisionId)),
+        );
       const heads = new Map(
         snapshot.entries.map((item) => [item.record.revisionId, item]),
       );
@@ -128,13 +572,101 @@ function populate(
   })();
 }
 
-export async function queryIndex(
+function applyChanges(
+  db: Database.Database,
   snapshots: Snapshot[],
-  options: QueryOptions,
-  protectedRoots: string[],
-  cacheRoot = defaultCacheRoot(),
-): Promise<QueryResult> {
-  const finishIndex = span('index.total');
+  fingerprint: string,
+): boolean {
+  if (
+    db
+      .prepare("SELECT value FROM settings WHERE key='version'")
+      .pluck()
+      .get() !== schemaVersion
+  )
+    return false;
+  const old = new Map(
+    db
+      .prepare<[], { key: string; hash: string; record: string }>(
+        'SELECT key,hash,record FROM hashes',
+      )
+      .all()
+      .map((row) => [row.key, row]),
+  );
+  const next = new Map<string, { record: Revision; hash: string }>();
+  const affected = new Set<string>();
+  for (const snapshot of snapshots) {
+    const hashes = new Map(
+      snapshot.hashes.map((item) => [item.revisionId, item.hash]),
+    );
+    for (const record of snapshot.records) {
+      const key = `${snapshot.location.path}:${record.revisionId}`;
+      const hash = hashes.get(record.revisionId)!;
+      const previous = old.get(key);
+      if (previous && previous.hash !== hash)
+        fail(
+          'CORRUPT_STORE',
+          'An immutable source revision changed since it was indexed.',
+        );
+      next.set(key, { record, hash });
+      if (!previous) affected.add(record.id);
+    }
+  }
+  const retained = new Set([...next.values()].map((item) => item.record.id));
+  for (const [key, row] of old)
+    if (!next.has(key)) {
+      const record = validateRevision(JSON.parse(row.record) as unknown);
+      if (retained.has(record.id))
+        fail(
+          'CORRUPT_STORE',
+          'A previously indexed revision is missing from a retained memory. Restore its complete history.',
+        );
+      affected.add(record.id);
+    }
+  const heads = new Map(
+    snapshots
+      .flatMap((item) => item.entries)
+      .map((item) => [item.record.revisionId, item]),
+  );
+  db.exec('CREATE TEMP TABLE affected(id TEXT PRIMARY KEY)');
+  const mark = db.prepare('INSERT INTO affected VALUES (?)');
+  const entry = db.prepare('INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?)');
+  const fts = db.prepare(
+    'INSERT INTO fts(content,tags,revisionId) VALUES (?,?,?)',
+  );
+  const hash = db.prepare('INSERT INTO hashes VALUES (?,?,?)');
+  db.transaction(() => {
+    for (const id of affected) mark.run(id);
+    db.exec(
+      'DELETE FROM fts WHERE revisionId IN (SELECT revisionId FROM entries WHERE id IN (SELECT id FROM affected)); DELETE FROM entries WHERE id IN (SELECT id FROM affected);',
+    );
+    for (const [key, item] of next) {
+      if (!old.has(key)) hash.run(key, item.hash, JSON.stringify(item.record));
+      const record = item.record;
+      if (!affected.has(record.id)) continue;
+      const head = heads.get(record.revisionId);
+      entry.run(
+        record.revisionId,
+        record.id,
+        record.status,
+        head ? 1 : 0,
+        head?.conflict ? 1 : 0,
+        JSON.stringify(record.tags),
+      );
+      if (head && !head.conflict && record.status === 'active')
+        fts.run(record.content, record.tags.join(' '), record.revisionId);
+    }
+    const removeHash = db.prepare('DELETE FROM hashes WHERE key=?');
+    for (const key of old.keys()) if (!next.has(key)) removeHash.run(key);
+    const setting = db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)');
+    setting.run('fingerprint', fingerprint);
+    setting.run('checkpoint', checkpoint(snapshots));
+    if (db.pragma('integrity_check', { simple: true }) !== 'ok')
+      throw new Error('Incremental integrity check');
+  }).immediate();
+  return true;
+}
+
+function validateQueryOptions(options: QueryOptions) {
   const query =
     options.query === undefined
       ? undefined
@@ -153,33 +685,99 @@ export async function queryIndex(
   const offset = options.offset ?? 0;
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000)
     fail('INVALID_LIMIT', 'Offset must be an integer from 0 through 1000000.');
-  cacheRoot = await canonical(cacheRoot);
-  for (const root of protectedRoots) {
-    const source = await canonical(root);
-    if (contains(source, cacheRoot) || contains(cacheRoot, source))
-      fail(
-        'UNSAFE_CACHE_PATH',
-        'Cache and memory storage directories must not overlap. Set MEMBRAIN_CACHE_DIR to a separate local directory.',
-      );
+  if (
+    options.verification !== undefined &&
+    !['fast', 'strict'].includes(options.verification)
+  )
+    fail('INVALID_QUERY', 'Verification must be strict or fast.');
+  return { query, offset };
+}
+interface QueryRow {
+  id: string;
+  revisionId: string;
+  head: number;
+  conflict: number;
+  score?: number;
+}
+function queryRows(db: Database.Database, options: QueryOptions): QueryRow[] {
+  const { query, offset } = validateQueryOptions(options);
+  const clauses: string[] = [];
+  const bindings: (string | number)[] = [];
+  if (query !== undefined) {
+    clauses.push('fts MATCH ?');
+    bindings.push(query);
+  } else {
+    if (!options.history) clauses.push('e.head = 1');
+    if (options.state !== 'all') {
+      clauses.push('e.status = ?');
+      bindings.push(options.state ?? 'active');
+    }
   }
+  for (const tag of options.tags ?? []) {
+    clauses.push('EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)');
+    bindings.push(tag);
+  }
+  const sql =
+    query === undefined
+      ? `SELECT e.id,e.revisionId,e.head,e.conflict FROM entries e ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY e.id COLLATE BINARY, e.revisionId COLLATE BINARY LIMIT ? OFFSET ?`
+      : `SELECT e.id,e.revisionId,e.head,e.conflict,bm25(fts,1.0,2.0) AS score FROM fts JOIN entries e ON e.revisionId=fts.revisionId WHERE ${clauses.join(' AND ')} ORDER BY score ASC,e.id COLLATE BINARY LIMIT ? OFFSET ?`;
+  bindings.push(options.limit, offset);
+  const rows = db.prepare<(string | number)[], QueryRow>(sql).all(...bindings);
+  return rows;
+}
+
+export async function queryIndex(
+  snapshots: Snapshot[],
+  options: QueryOptions,
+  protectedRoots: string[],
+  cacheRoot = defaultCacheRoot(),
+): Promise<QueryResult> {
+  const finishIndex = span('index.total');
+  validateQueryOptions(options);
+  cacheRoot = await canonical(cacheRoot);
   const snapshotsSorted = [...snapshots].sort((a, b) =>
     a.location.path < b.location.path ? -1 : 1,
   );
-  const key = createHash('sha256')
-    .update(JSON.stringify(snapshotsSorted.map((item) => item.location)))
-    .digest('hex');
   const fingerprint = createHash('sha256')
-    .update(JSON.stringify(snapshotsSorted.map((item) => item.fingerprint)))
+    .update(
+      JSON.stringify(
+        snapshotsSorted.map((item) => [item.fingerprint, item.binding]),
+      ),
+    )
     .digest('hex');
-  const directory = path.join(cacheRoot, key);
-  const file = path.join(directory, 'index.sqlite');
+  const file = await indexPath(
+    snapshotsSorted.map((item) => item.location),
+    protectedRoots,
+    cacheRoot,
+  );
+  const directory = path.dirname(file);
   const warnings = snapshots.flatMap((item) => item.warnings);
   let damaged = false;
+  let updated = false;
+  let canUpdate = false;
   const source = new Map(
     snapshots
       .flatMap((item) => item.records)
       .map((record) => [record.revisionId, record]),
   );
+  const identities = new Map<string, string>();
+  let revisionCount = 0;
+  for (const snapshot of snapshots)
+    for (const record of snapshot.records) {
+      revisionCount++;
+      const previous = identities.get(record.id);
+      if (previous !== undefined && previous !== snapshot.location.path)
+        fail(
+          'CORRUPT_STORE',
+          'Duplicate memory/revision IDs across selected stores.',
+        );
+      identities.set(record.id, snapshot.location.path);
+    }
+  if (source.size !== revisionCount)
+    fail(
+      'CORRUPT_STORE',
+      'Duplicate memory/revision IDs across selected stores.',
+    );
   // Ordinary queries open SQLite read-only and do not acquire a filesystem lock.
   // Replacement is serialized only when maintenance is actually necessary.
   async function existing(rebuilt = false): Promise<QueryResult | undefined> {
@@ -212,7 +810,7 @@ export async function queryIndex(
         timeout: 5_000,
       });
       db.exec(
-        'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;',
+        'PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; BEGIN;',
       );
       finishOpen();
       const finishIntegrity = span('index.integrity');
@@ -233,12 +831,13 @@ export async function queryIndex(
       const current =
         settings.get('version') === schemaVersion &&
         settings.get('fingerprint') === fingerprint;
+      canUpdate = settings.get('version') === schemaVersion;
       // This freshly computed fingerprint covers every source hash and manifest.
       // Only changed sources need the per-revision comparison, which rejects
       // edits to immutable IDs before considering a replacement generation.
       if (current) {
         // Retain structural recovery without materializing every hash row.
-        db.prepare('SELECT key,hash FROM hashes LIMIT 0').all();
+        db.prepare('SELECT key,hash,record FROM hashes LIMIT 0').all();
       } else {
         const oldHashes = new Map(
           db
@@ -259,57 +858,94 @@ export async function queryIndex(
                 'An immutable source revision changed since it was indexed. Restore the original or inspect its provenance; do not edit revision files in place.',
               );
           }
+        if (settings.get('version') === schemaVersion) {
+          const retained = new Set(
+            [...source.values()].map((record) => record.id),
+          );
+          const present = new Set(
+            snapshots.flatMap((snapshot) =>
+              snapshot.hashes.map(
+                (item) => `${snapshot.location.path}:${item.revisionId}`,
+              ),
+            ),
+          );
+          for (const row of db
+            .prepare<[], { key: string; record: string }>(
+              'SELECT key,record FROM hashes',
+            )
+            .all()) {
+            if (!present.has(row.key)) {
+              const record = validateRevision(
+                JSON.parse(row.record) as unknown,
+              );
+              if (retained.has(record.id))
+                fail(
+                  options.verification === 'fast'
+                    ? 'SOURCE_CHANGED'
+                    : 'CORRUPT_STORE',
+                  'A previously indexed revision is missing from a retained memory. Restore its complete history.',
+                );
+            }
+          }
+        }
       }
       finishFreshness();
       if ((!rebuilt && options.rebuild) || !current) return undefined;
       const finishQuery = span('index.ftsBm25');
-      const clauses: string[] = [];
-      const bindings: (string | number)[] = [];
-      if (query !== undefined) {
-        clauses.push('fts MATCH ?');
-        bindings.push(query);
-      } else {
-        if (!options.history) clauses.push('e.head = 1');
-        if (options.state !== 'all') {
-          clauses.push('e.status = ?');
-          bindings.push(options.state ?? 'active');
-        }
-      }
-      for (const tag of options.tags ?? []) {
-        clauses.push(
-          'EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)',
-        );
-        bindings.push(tag);
-      }
-      const sql =
-        query === undefined
-          ? `SELECT e.revisionId,e.head,e.conflict FROM entries e ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY e.id COLLATE BINARY, e.revisionId COLLATE BINARY LIMIT ? OFFSET ?`
-          : `SELECT e.revisionId,e.head,e.conflict,bm25(fts,1.0,2.0) AS score FROM fts JOIN entries e ON e.revisionId=fts.revisionId WHERE ${clauses.join(' AND ')} ORDER BY score ASC,e.id COLLATE BINARY LIMIT ? OFFSET ?`;
-      bindings.push(options.limit, offset);
-      const rows = db
-        .prepare<
-          (string | number)[],
-          { revisionId: string; head: number; conflict: number; score?: number }
-        >(sql)
-        .all(...bindings);
+      const rows = queryRows(db, options);
       finishQuery();
-      const results = rows.map((row) => {
-        const record = source.get(row.revisionId);
-        if (!record)
-          fail(
-            'INDEX_FAILED',
-            'Index contains an unknown source revision. Rebuild it with --rebuild-index.',
-          );
-        return {
-          record,
-          conflict: row.conflict === 1,
-          historical: row.head !== 1,
-          ...(row.score === undefined ? {} : { score: row.score }),
-        };
-      });
+      const results = await Promise.all(
+        rows.map(async (row) => {
+          let record = source.get(row.revisionId);
+          if (!record)
+            fail(
+              'INDEX_FAILED',
+              'Index contains an unknown source revision. Rebuild it with --rebuild-index.',
+            );
+          if (options.verification === 'fast') {
+            const snapshot = snapshots.find((item) =>
+              item.records.some((item) => item.revisionId === row.revisionId),
+            )!;
+            const file = path.join(
+              snapshot.location.path,
+              'records',
+              record.id,
+              `${record.revisionId}.jsonl`,
+            );
+            await regularFile(file);
+            const checked = decodeRevision(
+              await readFile(file),
+              { file, id: record.id, revisionId: record.revisionId },
+              snapshot.location,
+            );
+            if (
+              checked.hash !==
+              snapshot.hashes.find((item) => item.revisionId === row.revisionId)
+                ?.hash
+            )
+              fail(
+                'CORRUPT_STORE',
+                'An immutable source revision changed since it was indexed. Use strict verification and inspect its provenance.',
+              );
+            record = checked.record;
+          }
+          return {
+            record,
+            conflict: row.conflict === 1,
+            historical: row.head !== 1,
+            ...(row.score === undefined ? {} : { score: row.score }),
+          };
+        }),
+      );
       return {
         results,
-        index: { path: file, rebuilt, revisions: source.size },
+        index: {
+          path: file,
+          rebuilt,
+          revisions: source.size,
+          ...(updated ? { updated: true } : {}),
+          verification: options.verification ?? 'strict',
+        },
         warnings,
       };
     } catch (error) {
@@ -337,10 +973,28 @@ export async function queryIndex(
       const temporary = path.join(directory, `${randomUUID()}.sqlite`);
       let generation: Database.Database | undefined;
       try {
+        // Apply deltas to a private copy. A crash cannot leave a hot rollback
+        // journal beside the published generation or expose half-updated FTS.
+        const incremental =
+          options.verification === 'fast' &&
+          !options.rebuild &&
+          !damaged &&
+          canUpdate;
+        if (incremental) await copyFile(file, temporary);
         generation = new Database(temporary);
         await chmod(temporary, 0o600);
         const finishBuild = span('index.build');
-        populate(generation, snapshotsSorted, fingerprint);
+        if (incremental) {
+          generation.exec(
+            'PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL;',
+          );
+          updated = applyChanges(generation, snapshotsSorted, fingerprint);
+          if (!updated)
+            fail(
+              'INDEX_FAILED',
+              'Index version changed during incremental maintenance. Retry with --rebuild-index.',
+            );
+        } else populate(generation, snapshotsSorted, fingerprint);
         finishBuild();
         if (generation.pragma('integrity_check', { simple: true }) !== 'ok')
           fail('INDEX_FAILED', 'New index generation failed validation.');
@@ -349,25 +1003,7 @@ export async function queryIndex(
           .run();
         generation.close();
         generation = undefined;
-        // Windows cannot replace a SQLite file while another reader holds its
-        // native handle. Wait briefly for readers, retaining the maintenance
-        // lock and checking ownership on every attempt. Never unlink the old
-        // generation or relax permissions to force replacement.
-        for (let attempt = 0; ; attempt++) {
-          await assertOwned();
-          try {
-            await rename(temporary, file);
-            break;
-          } catch (error) {
-            if (
-              process.platform !== 'win32' ||
-              attempt >= 40 ||
-              !['EPERM', 'EACCES', 'EBUSY'].includes(errno(error) ?? '')
-            )
-              throw error;
-            await delay(25);
-          }
-        }
+        await publishGeneration(temporary, file, assertOwned);
       } finally {
         generation?.close();
         await unlink(temporary).catch(() => undefined);
@@ -378,7 +1014,7 @@ export async function queryIndex(
           message:
             'The disposable SQLite index was damaged or incompatible and has been rebuilt from validated JSONL.',
         });
-      const result = await existing(true);
+      const result = await existing(!updated);
       if (!result)
         fail(
           'INDEX_FAILED',
@@ -388,10 +1024,7 @@ export async function queryIndex(
     });
   } catch (error) {
     if (error instanceof MembrainError) throw error;
-    fail(
-      'INDEX_UNAVAILABLE',
-      `Cannot access the local index at ${directory}. Close commands holding the index and check cache directory permissions, free space, and SQLite installation, or set MEMBRAIN_CACHE_DIR to a writable local directory. A current index can be reused with --read-only; a missing or stale index needs internal cache writes. Memory source records were not changed.`,
-    );
+    indexUnavailable(directory);
   } finally {
     finishIndex();
   }

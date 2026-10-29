@@ -4,6 +4,13 @@ Phase 4 implements native Git synchronization. GitHub is one possible host;
 Membrain uses no GitHub API, account system, token store, MCP, or background
 service. Local memory commands work offline without Git installed.
 
+Phase 8 recall freshness is independent of Git metadata: explicit fast reads
+scan actual revision paths and verify additions/returned bytes. Pulls and
+additive merges need no checkpoint hook or journal; in-place edits require
+strict verification to audit unreturned history. Strict remains the retrieval
+default, and synchronization still performs complete source/history validation.
+See [index-freshness.md](index-freshness.md). No Git safety boundary changes.
+
 ## Policies and selection
 
 | Scope policy                    | Memory commands                                    | Explicit `membrain sync`                                |

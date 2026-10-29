@@ -12,6 +12,9 @@ import { queryIndex } from '../dist/index/search.js';
 
 const count = Number(process.argv[2] ?? 10_000);
 const samples = Number(process.argv[3] ?? 30);
+const verification = process.argv[4] ?? 'strict';
+if (!['strict', 'fast'].includes(verification))
+  throw new Error('Use strict or fast verification.');
 if (!Number.isSafeInteger(count) || count < 1 || count > 50_000)
   throw new Error('Use an integer count from 1 to 50000.');
 if (!Number.isSafeInteger(samples) || samples < 1 || samples > 100)
@@ -190,6 +193,7 @@ try {
         '--json',
         'recall',
         'sqlite',
+        ...(verification === 'fast' ? ['--verification', 'fast'] : []),
       ],
       {
         cwd: directory,
@@ -294,6 +298,7 @@ try {
     JSON.stringify(
       {
         node: process.version,
+        verification,
         platform: process.platform,
         arch: process.arch,
         osRelease: os.release(),

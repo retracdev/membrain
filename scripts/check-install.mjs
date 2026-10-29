@@ -144,6 +144,18 @@ try {
   );
   const recalled = cli(['recall', 'SQLite', '--scope', 'global']);
   assert.equal(recalled.results[0].id, saved.record.id);
+  const fast = cli([
+    'recall',
+    'SQLite',
+    '--scope',
+    'global',
+    '--verification',
+    'fast',
+    '--read-only',
+  ]);
+  assert.equal(fast.results[0].id, saved.record.id);
+  assert.equal(fast.index.verification, 'fast');
+  assert.equal(fast.index.rebuilt, false);
   assert.equal(
     cli(['recall', 'SQLite', '--scope', 'global', '--read-only']).index.rebuilt,
     false,

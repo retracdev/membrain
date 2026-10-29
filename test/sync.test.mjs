@@ -142,6 +142,49 @@ function success(report) {
   return first(report);
 }
 
+test('fast checkpoints detect Git additive merges, imported updates and deletion tombstones', async (t) => {
+  const f = await fixture(t);
+  const { configB, engineB } = f.clone();
+  const queryA = () =>
+    f.engineA.query(
+      { scope: 'global' },
+      { query: 'SQLite', limit: 100, verification: 'fast' },
+    );
+  await queryA();
+  await engineB.update({ scope: 'global' }, f.record.id, {
+    content: 'SQLite remote updated decision',
+  });
+  success(await synchronizeMemories(configB, { scope: 'global' }, f.b));
+  await f.engineA.remember(
+    { scope: 'global' },
+    { content: 'SQLite independent local merge decision' },
+  );
+  success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
+  const merged = await queryA();
+  assert.equal(merged.results.length, 2);
+  assert.match(
+    merged.results.find(({ record }) => record.id === f.record.id).record
+      .content,
+    /remote updated/u,
+  );
+  success(await synchronizeMemories(configB, { scope: 'global' }, f.b));
+  await engineB.forget({ scope: 'global' }, f.record.id);
+  success(await synchronizeMemories(configB, { scope: 'global' }, f.b));
+  success(await synchronizeMemories(f.configA, { scope: 'global' }, f.a));
+  const deleted = await queryA();
+  assert.ok(deleted.results.every(({ record }) => record.id !== f.record.id));
+  assert.deepEqual(
+    deleted.results,
+    (
+      await f.engineA.query(
+        { scope: 'global' },
+        { query: 'SQLite', limit: 100 },
+      )
+    ).results,
+  );
+  assert.equal(git(f.a, 'status', '--porcelain'), '');
+});
+
 test('manual sync commits only managed files, repeats without commits, and preserves clean unrelated files', async (t) => {
   const f = await fixture(t, { seed: false });
   const before = git(f.a, 'rev-parse', 'HEAD');

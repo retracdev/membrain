@@ -2,6 +2,13 @@
 
 ## Available now
 
+`recall`, `search` and `list` accept `--verification strict|fast` (default
+`strict`). Fast scans actual revision paths and verifies returned bytes while
+reusing validated history. It does not audit unreturned in-place edits; run
+strict or `--rebuild-index` for complete byte verification. JSON
+`index.verification` identifies the mode; `index.updated` identifies incremental
+maintenance. See [index-freshness.md](index-freshness.md) before opting in.
+
 Help, version, read-only status, interactive/non-interactive init, Git sync,
 portable skill export, and all six memory commands work. See
 [initialization.md](initialization.md) for setup and

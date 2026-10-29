@@ -13,6 +13,8 @@ export interface ReplayJob {
   location: Location;
   directories: string[];
   profile: boolean;
+  known?: string[];
+  inventory?: boolean;
 }
 export interface Metric {
   name: string;
@@ -22,6 +24,7 @@ export interface Metric {
 }
 export interface ReplayChunk {
   loaded: LoadedRevision[];
+  reused: string[];
   warnings: Warning[];
   metrics: Metric[];
 }
@@ -62,6 +65,8 @@ if (job.profile)
   });
 try {
   const loaded: LoadedRevision[] = [];
+  const reused: string[] = [];
+  const known = new Set(job.known);
   const warnings: Warning[] = [];
   for (const id of job.directories) {
     const directory = path.join(job.location.path, 'records', id);
@@ -74,6 +79,11 @@ try {
     for (const entry of entries) {
       const source = sourceFile(entry, directory, id, warnings);
       if (!source) continue;
+      const key = `${id}/${source.revisionId}`;
+      if (job.inventory || known.has(key)) {
+        reused.push(key);
+        continue;
+      }
       try {
         const stat = io('fs.lstatSync', () => lstatSync(source.file));
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 262_144)
@@ -87,6 +97,7 @@ try {
   }
   parentPort!.postMessage({
     loaded,
+    reused,
     warnings,
     metrics: [...metrics.values()],
   } satisfies ReplayChunk);

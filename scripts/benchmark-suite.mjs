@@ -7,14 +7,14 @@ if (!/^[a-z0-9-]+$/u.test(label)) throw new Error('Use a simple report label.');
 const counts = (process.argv[3] ?? '100,1000,10000').split(',');
 const samples = process.argv[4] ?? '30';
 const kind = process.argv[5] ?? 'global';
-if (!['global', 'mixed'].includes(kind))
-  throw new Error('Use global or mixed.');
+if (!['global', 'mixed', 'fast'].includes(kind))
+  throw new Error('Use global (strict), fast, or mixed (strict).');
 const gate = process.argv[6] === '--gate';
 if (process.argv[6] !== undefined && !gate)
   throw new Error('Unknown suite option.');
 if (
   gate &&
-  (kind !== 'global' || !counts.includes('10000') || Number(samples) < 30)
+  (kind === 'mixed' || !counts.includes('10000') || Number(samples) < 30)
 )
   throw new Error(
     'The latency gate needs global 10000 with at least 30 samples.',
@@ -36,6 +36,7 @@ for (const count of counts) {
       ),
       count,
       samples,
+      ...(kind === 'fast' ? ['fast'] : []),
     ],
     { shell: false },
   );
